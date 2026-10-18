@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import * as E from "./env.mjs";
 import { DEVICES, FAMILIES, estimateHeight, estimateWidth, widgetHTML, previewPage } from "./preview.mjs";
+import { decodePNG } from "./png.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dotenv = path.join(here, "..", ".env"); // never committed
@@ -27,20 +28,40 @@ const src = fs.readFileSync(path.join(here, "..", "TaiwanWeather.js"), "utf8");
 let passed = 0, failed = 0;
 const test = async (name, fn) => {
   try { await fn(); passed++; console.log("✓", name); }
-  catch (e) { failed++; console.log("✗", name, "\n   ", String(e.stack).split("\n").slice(0, 4).join("\n    ")); }
+  catch (e) {
+    failed++;
+    const at = String(e.stack).split("\n").find((l) => l.includes("harness.mjs")) || "";
+    console.log("✗", name, "\n   ", String(e.message).split("\n").slice(0, 14).join("\n    "), "\n   ", at.trim());
+  }
 };
+const CONFIG0 = { ...W.CONFIG };
 function reset({ at = null, cwa = "fixture", om = "fixture" } = {}) {
   Object.assign(E.clock, { now: at });
-  Object.assign(E.net, { cwa, om, cwaKey: null, unknownTowns: [], warnings: [], raw: {} });
+  Object.assign(E.net, { cwa, om, rainviewer: "fixture", qpf: "fixture", cwaKey: null, unknownTowns: [], warnings: [], raw: {},
+    delay: {}, times: [] });
+  Object.assign(E.scriptArgs, { widgetParameter: null, queryParameters: {} });
+  Object.assign(W.CONFIG, CONFIG0);
+  W.sharedDownloads.clear();
+  W.setLang("en");
   E.net.log.length = 0;
   Object.assign(E.env, { location: E.HOME, geocode: () => [], geocodeCalls: 0, usedICloud: false,
-    widget: null, html: null, presented: null });
+    widget: null, html: null, presented: null, loads: 0, webview: null, notifications: [], pages: [], pageState: { y: 0, busy: false } });
   E.alerts.answers.length = 0; E.alerts.shown.length = 0;
   E.keychain.clear();
   E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
   E.resetState();
 }
 const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+const waitFor = async (ok, ms = 3000) => {
+  for (let t = 0; t < ms && !ok(); t += 5) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(ok(), "still waiting after " + ms + " ms");
+};
+// The side a page slides in from (data-enter on <body>; the CSS mentions both sides, so look at the tag itself).
+const entered = (html) => (html.match(/<body [^>]*data-enter="([^"]*)"/) || [])[1];
+const savePlaces = (places) => {
+  fs.mkdirSync(path.dirname(E.settingsFile), { recursive: true });
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ places: places.map((p) => ({ county: p.slice(0, 3), name: p.slice(3) })) }));
+};
 const truthAt = (key) => E.world.temp(E.tw(key + ":00"));
 const rawResponse = (part) => E.net.raw[E.net.log.find((u) => u.includes(part))];
 
@@ -187,6 +208,47 @@ await test("sunrise and sunset times, moon phases at known eclipses, feels-like,
   assert.deepEqual([0, 1, 3, 45, 61, 80, 95, 71].map(W.wmoText), ["晴", "晴時多雲", "陰", "有霧", "有雨", "有雨", "雷雨", "有雪"]);
 });
 
+await test("next-hour nowcast: rain moving toward you arrives on time; rain moving away stops", () => {
+  const size = 96, frame = (cx, cy, r, dbz) => {
+    const g = new Uint8Array(size * size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) g[y * size + x] = dbz;
+    return g;
+  };
+  // a 35 dBZ band (radius 8 px) moving 4 px east per 10 minutes, its centre 24 px west of you now
+  const coming = W.nowcastFrom([frame(16, 48, 8, 35), frame(20, 48, 8, 35), frame(24, 48, 8, 35)], size, 0);
+  assert.deepEqual(coming.motion, { dx: 4, dy: 0 });
+  const first = coming.steps.find((s) => s.mmh > 0); // its edge reaches you after (24 - 8 - 1) / 4 × 10 ≈ 37.5 min
+  assert.ok(first && first.min >= 30 && first.min <= 40, JSON.stringify(first));
+  assert.ok(coming.steps[0].mmh === 0 && Math.abs(first.mmh - 5.6) < 0.2, "35 dBZ is about 5.6 mm/h");
+  // a shower over you moving 3 px north per 10 minutes: it has left after (8 + 1) / 3 × 10 = 30 min
+  const going = W.nowcastFrom([frame(48, 54, 8, 30), frame(48, 51, 8, 30), frame(48, 48, 8, 30)], size, 0);
+  assert.deepEqual(going.motion, { dx: 0, dy: -3 });
+  const stop = going.steps.find((s) => s.mmh === 0);
+  assert.ok(going.steps[0].mmh > 0 && stop.min >= 25 && stop.min <= 35, JSON.stringify(stop));
+  // nothing on the radar: no rain, and no motion guessed
+  const none = W.nowcastFrom([frame(0, 0, 0, 0), frame(0, 0, 0, 0), frame(0, 0, 0, 0)], size, 0);
+  assert.ok(none.steps.every((s) => s.mmh === 0) && !none.moving);
+  // one stray 45 dBZ pixel right over you (a ship, birds, clutter) isn't rain; four pixels of a shower are
+  const cells = (list) => { const g = new Uint8Array(size * size); for (const [x, y, v] of list) g[y * size + x] = v; return g; };
+  const speck = cells([[48, 48, 45]]), shower = cells([[47, 48, 30], [48, 48, 30], [48, 47, 30], [49, 49, 30]]);
+  assert.ok(W.nowcastFrom([speck, speck, speck], size, 0).steps.every((s) => s.mmh === 0));
+  assert.ok(W.nowcastFrom([shower, shower, shower], size, 0).steps.every((s) => s.mmh > 2));
+});
+
+await test("radar colours: RainViewer's colours read back as dBZ; its see-through tan (clutter, drizzle) is dry", () => {
+  const colors = W.RAINVIEWER_COLORS.split(" "), rgb = (h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  assert.equal(colors.length, 51, "15 to 65 dBZ");
+  // each colour once; then 13 dBZ tan (alpha 180), a clear pixel, a green RainViewer doesn't use, and 15 dBZ off by one
+  const px = [...colors.map((h) => [...rgb(h), 255]), [218, 204, 147, 180], [0, 0, 0, 0], [12, 200, 40, 255], [137, 220, 238, 255]];
+  const { dbz, seen, odd } = W.radarDBZ(new Uint8ClampedArray(px.flat()), W.RAINVIEWER_COLORS);
+  assert.deepEqual([...dbz.slice(0, 51)], colors.map((_, i) => 15 + i));
+  assert.deepEqual([...dbz.slice(51)], [0, 0, 0, 15]);
+  assert.deepEqual([seen, odd], [53, 1]);
+  // what the old reading (grey = dBZ + 32) made of RainViewer's colours: the tan clutter was 186 dBZ, a downpour,
+  // and 30 dBZ rain (#005588, red 0) was dry
+  assert.deepEqual([218 - 32, Math.max(0, 0x00 - 32)], [186, 0]);
+});
+
 await test("weather symbols: day/night, rain, thunder, fog, snow; only known SF Symbol names", () => {
   const cases = [
     [["晴", 0, false], "sun.max.fill"], [["晴", 0, true], "moon.stars.fill"],
@@ -255,8 +317,8 @@ await test("CWA format checks accept the fixtures (they run on the real API when
   reset({ at: E.tw("2026-10-02T15:10") });
   await W.run("KEY");
   const st = stationFormat(rawResponse("O-A0001-001")), fc = forecastFormat(rawResponse("F-D0047-061"));
-  assert.deepEqual([st.stations, st.wgs84, st.dailyHighLow], [3, 3, 1]);
-  assert.deepEqual(st.precipitation, { mm: 2, "-99": 1 });
+  assert.deepEqual([st.stations, st.wgs84, st.dailyHighLow], [4, 4, 1]);
+  assert.deepEqual(st.precipitation, { mm: 3, "-99": 1 });
   assert.deepEqual([fc.towns, fc.tempStepHours, fc.popHours], [1, 3, 3]); // LocationName asks for one township
 });
 
@@ -268,13 +330,13 @@ await test("township: the nearest township centre, or Apple's answer when its na
   reset({ at: E.tw("2026-10-02T15:10") });
   E.env.location = border;
   let r = await W.run("KEY");
-  assert.deepEqual([r.place, r.placeVia], ["臺北市大同區", "nearest township centre"]);
+  assert.deepEqual([r.place, r.placeVia], ["臺北市大同區", "nearest"]);
   reset({ at: E.tw("2026-10-02T15:10") });
   E.env.location = border;
   E.env.geocode = () => [{ name: "南京西路", administrativeArea: "台北市", locality: "台北市", subLocality: "中山區",
     location: { latitude: 25.0675, longitude: 121.512 } }];
   r = await W.run("KEY");
-  assert.deepEqual([r.place, r.placeVia], ["臺北市中山區", "Apple Maps"]);
+  assert.deepEqual([r.place, r.placeVia], ["臺北市中山區", "apple"]);
   assert.ok(E.net.log.some((u) => u.includes("F-D0047-061") && u.includes("LocationName=" + encodeURIComponent("中山區"))));
   // names Apple gives in English, or no answer at all: the nearest centre
   for (const geocode of [() => [{ administrativeArea: "Taipei City", subLocality: "Zhongshan District" }],
@@ -316,7 +378,7 @@ await test("station list: fetched in full once a week; other runs ask only for t
   const [full, near] = stationUrls();
   assert.ok(!full.includes("StationId=") && near.includes("StationId="), near);
   assert.deepEqual(new URL(near).searchParams.get("StationId").split(",").sort(), ["467350", "C0AC70", "X1"]);
-  assert.equal(E.readState().stations.list.length, 3);
+  assert.equal(E.readState().stations.list.length, 4);
   E.clock.now = start + 8 * 24 * E.HOUR; // a week later: the full list again
   await W.run("KEY");
   assert.ok(!stationUrls()[2].includes("StationId="));
@@ -456,7 +518,7 @@ await test("app view: ten days, details, air quality and radar are fetched only 
   E.keychain.set("CWA_API_KEY", "KEY");
   E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
   await W.main();
-  const appOnly = ["air-quality", "O-A0058-006", "F-D0047-063", "daily="];
+  const appOnly = ["air-quality", "O-A0058-006", "F-D0047-063", "daily=", "rainviewer"];
   assert.deepEqual(appOnly.filter((part) => E.net.log.some((u) => u.includes(part))), [], "widget runs stay light");
   E.net.log.length = 0;
   E.setConfig({ runsInApp: true });
@@ -509,6 +571,294 @@ await test("CWA warnings: shown in the widgets and the app; expired ones are dro
   assert.deepEqual(stale.warnings, []);
 });
 
+await test("places from what people type: 台/臺, spaces, unique short names; ambiguous ones are refused", () => {
+  assert.equal(W.findPlace("臺南市東區").county, "臺南市");
+  assert.equal(W.findPlace(" 台南市 東區 ").name, "東區");
+  assert.equal(W.findPlace("那瑪夏區").county, "高雄市");
+  assert.equal(W.findPlace("那瑪夏").name, "那瑪夏區");
+  for (const q of ["東區", "信義", "", "Tokyo"]) assert.equal(W.findPlace(q), null, q);
+});
+
+await test("saved places: own forecast and learning file; a widget's Parameter pins it, and a tap opens it", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.scriptArgs.widgetParameter = "台南市東區";
+  E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
+  await W.main();
+  assert.equal(E.texts(E.env.widget)[0], "臺南市東區");
+  assert.equal(E.env.widget.url, "scriptable:///run/TaiwanWeather?place=" + encodeURIComponent("臺南市東區"));
+  assert.ok(fs.existsSync(E.placeFile("臺南市東區")) && !fs.existsSync(E.stateFile), "learning kept apart from My Location");
+  assert.ok(E.net.log.some((u) => u.includes("F-D0047-077") && u.includes("LocationName=" + encodeURIComponent("東區"))));
+  assert.equal(E.env.geocodeCalls, 0, "a saved place needs no geocoding");
+  // tapping that widget runs the script in the app with ?place=…: the full view opens on it and saves it
+  Object.assign(E.scriptArgs, { widgetParameter: null, queryParameters: { place: "臺南市東區" } });
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.match(E.env.html, /<a class="chip on" href="tw-weather:\/\/show\?place=0">臺南市東區<\/a>/);
+  E.scriptArgs.queryParameters = {};
+  E.scriptArgs.widgetParameter = "東區"; // in three cities
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  assert.match(E.texts(E.env.widget).join(" "), /Unknown place "東區"/);
+});
+
+await test("full view: add, switch and remove places; switch to 中文; turn a notification off", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  const settings = () => JSON.parse(fs.readFileSync(E.settingsFile, "utf8"));
+  assert.match(E.env.html, /📍 My Location/);
+  assert.equal(E.env.webview.shouldAllowRequest({ url: "https://tile.openstreetmap.org/8/1/2.png" }), true);
+  assert.equal(await E.tap("tw-weather://add?place=" + encodeURIComponent("花蓮縣花蓮市")), false);
+  assert.match(E.env.html, /<p class="place">花蓮縣花蓮市<\/p>/);
+  assert.deepEqual(settings().places, [{ county: "花蓮縣", name: "花蓮市" }]);
+  await E.tap("tw-weather://show?place=here");
+  assert.match(E.env.html, /<p class="place">臺北市信義區<\/p>/);
+  await E.tap("tw-weather://lang?to=zh");
+  for (const zh of ["📍 目前位置", "10 天預報", "空氣品質", "預報怎麼來的", '<html lang="zh-Hant-TW">']) assert.ok(E.env.html.includes(zh), zh);
+  fs.writeFileSync(path.join(E.stateDir, "app-zh.html"), E.env.html);
+  await E.tap("tw-weather://notify?rain=0");
+  assert.deepEqual([settings().lang, settings().notify.rain, settings().notify.warnings], ["zh", false, true]);
+  await E.tap("tw-weather://show?place=0");
+  await E.tap("tw-weather://remove?place=0");
+  assert.deepEqual(settings().places, []);
+  assert.match(E.env.html, /<p class="place">臺北市信義區<\/p>/);
+  // the widgets follow the language
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  assert.ok(E.texts(E.env.widget).some((t) => /^高\d+° 低\d+°$/.test(t)), E.texts(E.env.widget).join(" / "));
+});
+
+await test("notifications for My Location: rain within the hour once, each new warning once, only when on", async () => {
+  reset({ at: E.tw("2026-10-02T14:20") }); // rain is due at 15:00
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.net.warnings = [{ phenomena: "大雨", significance: "特報", end: "2026-10-02 23:00:00" }];
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  assert.deepEqual(E.env.notifications.map((n) => n.title), ["🌧️ Rain soon · 臺北市信義區", "⚠️ 大雨特報 · 臺北市信義區"]);
+  assert.match(E.env.notifications[0].body, /^Rain likely around 15:00 \(\d+%\)\.$/);
+  assert.equal(E.env.notifications[1].body, "Until 10/02 23:00 · CWA");
+  assert.equal(E.env.notifications[0].openURL, "scriptable:///run/TaiwanWeather");
+  E.clock.now = E.tw("2026-10-02T14:40");
+  await W.main();
+  assert.equal(E.env.notifications.length, 2, "no repeats");
+  E.net.warnings.push({ phenomena: "陸上強風", significance: "特報", end: "2026-10-02 23:00:00" });
+  await W.main();
+  assert.deepEqual(E.env.notifications.slice(2).map((n) => n.title), ["⚠️ 陸上強風特報 · 臺北市信義區"]);
+  // a saved place never notifies; with both switches off, nothing does
+  E.net.warnings.push({ phenomena: "濃霧", significance: "特報", end: "2026-10-02 23:00:00" });
+  E.scriptArgs.widgetParameter = "臺南市東區";
+  await W.main();
+  E.scriptArgs.widgetParameter = null;
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ notify: { rain: false, warnings: false } }));
+  await W.main();
+  assert.equal(E.env.notifications.length, 3);
+});
+
+await test("next hour: CWA's radar forecast is read at your cell, and fetched only when rain looks possible", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") }); // rain due at 15:00
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  let r = E.readState().lastResult;
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.qpf.mm, 3.2);
+  assert.ok(E.env.html.includes("CWA radar forecast: 3.2 mm in the next hour."));
+  assert.ok(E.env.html.includes('id="nh-chart"') && E.env.html.includes("function nowcastFrom("), "the page runs the nowcast");
+  reset({ at: E.tw("2026-10-01T09:20") }); // a dry morning: the 2.7 MB file is skipped
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  r = E.readState().lastResult;
+  assert.ok(r.qpf == null && !E.net.log.some((u) => u.includes("F-B0046-001")));
+});
+
+await test("radar card: the map stays over Taiwan; CWA 降雨雷達 tab, nearest radar first, your position on its image", async () => {
+  // where Taiwan's northern and eastern tips are on the 樹林 image (found in its pixels)
+  const shulin = W.RAIN_RADARS[0];
+  const [fx, fy] = W.rainRadarPixel(shulin, { latitude: 25.2974, longitude: 121.5361 }); // 富貴角, found at (1966, 1397)
+  const [sx, sy] = W.rainRadarPixel(shulin, { latitude: 25.0063, longitude: 122.0007 }); // 三貂角, found at (2533, 1782)
+  assert.ok(Math.hypot(fx - 1966, fy - 1397) < 20 && Math.hypot(sx - 2533, sy - 1782) < 20, JSON.stringify([fx, fy, sx, sy]));
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  const stations = (html) => [...html.matchAll(/<button type="button" data-i="\d"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
+  assert.deepEqual(stations(E.env.html), ["樹林", "南屯", "林園"]);
+  assert.ok(E.env.html.includes("CWA rain radar at 樹林 13:08, every 2 minutes"), "the radar image's time");
+  assert.ok(E.env.html.includes('data-tab="cwa"') && E.env.html.includes("O-A0084-001.png"));
+  assert.ok(E.env.html.includes("minZoom: 7, maxBounds: TAIWAN") && E.env.html.includes("[[20.6, 117.6], [27.0, 123.4]]"));
+  E.scriptArgs.queryParameters = { place: "高雄市鳳山區" };
+  await W.main();
+  assert.deepEqual(stations(E.env.html), ["林園", "南屯", "樹林"]);
+});
+
+await test("swiping: dots for each place, a slide-in from the side swiped, neighbours loaded ahead", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  fs.mkdirSync(path.dirname(E.settingsFile), { recursive: true });
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ places: [{ county: "臺南市", name: "東區" }, { county: "花蓮縣", name: "花蓮市" }] }));
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.equal((E.env.html.match(/<a class="dot/g) || []).length, 3);
+  fs.writeFileSync(path.join(E.stateDir, "app-places.html"), E.env.html);
+  assert.ok(E.env.html.includes('const order = ["here",0,1], at = 0;'));
+  // the place to the right (臺南市東區) is fetched in the background right away
+  for (let i = 0; i < 300 && !fs.existsSync(E.placeFile("臺南市東區")); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(fs.existsSync(E.placeFile("臺南市東區")), "neighbour prefetched");
+  const before = E.net.log.length;
+  await E.tap("tw-weather://show?place=0&dir=left");
+  assert.equal(entered(E.env.html), "left");
+  assert.match(E.env.html, /<p class="place">臺南市東區<\/p>/);
+  assert.ok(!E.net.log.slice(before).some((u) => u.includes("F-D0047-077")), "shown from the prefetch, no new download");
+  await E.tap("tw-weather://show?place=here&dir=right");
+  assert.equal(entered(E.env.html), "right");
+  assert.ok(E.env.html.includes('const names = ["My Location","臺南市東區","花蓮縣花蓮市"]'), "names for the swipe's Loading… page");
+});
+
+await test("tapping any widget opens the full view, whatever its When Interacting option says", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  for (const family of ["small", "medium", "large", "accessoryRectangular"]) {
+    E.setConfig({ runsInWidget: true, widgetFamily: family });
+    await W.main();
+    assert.equal(E.env.widget.url, "scriptable:///run/TaiwanWeather", family);
+  }
+});
+
+await test("a slow Open-Meteo doesn't hold up CWA's forecast, and a stalled one is given up after its timeout", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  W.CONFIG.abroadTimeout = 0.3; // seconds (10 on the phone)
+  E.net.delay = { "api.open-meteo.com": 5000 };
+  const t0 = Date.now(), r = await W.run("KEY"), took = Date.now() - t0;
+  assert.ok(took < 1500, took + " ms");
+  assert.deepEqual(r.sources, ["cwa"]);
+  assert.match(r.errors.join(" "), /timed out/);
+  const cwa = E.net.times.find((t) => t.url.includes("F-D0047-061")), om = E.net.times.find((t) => t.url.includes("api.open-meteo.com"));
+  assert.ok(cwa.end < om.end, "CWA's forecast came in before Open-Meteo was given up");
+});
+
+await test("the full view opens at once on the last saved forecast (marked Updating), then shows the new one where you were", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main(); // saves a forecast
+  E.clock.now = E.tw("2026-10-02T13:50");
+  E.env.pages.length = 0;
+  E.net.delay = { "api.open-meteo.com": 300 };
+  E.env.pageState = { y: 640, busy: false }; // scrolled down meanwhile
+  await W.main();
+  assert.equal(E.env.pages.length, 2);
+  assert.ok(E.env.pages[0].includes("↻ Updating… (shown: 13:20)"), "the saved forecast, at once");
+  fs.writeFileSync(path.join(E.stateDir, "app-updating.html"), E.env.pages[0]);
+  assert.ok(!E.env.pages[0].includes('id="nh-chart"'), "no next hour from old radar frames");
+  assert.ok(!E.env.pages[1].includes("Updating…") && E.env.pages[1].includes('id="nh-chart"'));
+  assert.ok(E.env.pages[1].includes("window.scrollTo(0, 640);"), "kept where it was scrolled");
+  fs.writeFileSync(path.join(E.stateDir, "app-scrolled.html"), E.env.pages[1]);
+});
+
+await test("swiping to a place still loading: its name or its saved forecast after a second, then the new one", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  savePlaces(["臺南市東區", "花蓮縣花蓮市"]);
+  W.CONFIG.swipeWaitMs = 50; // 1000 on the phone
+  E.net.delay = { "F-D0047-077": 400, "F-D0047-079": 400 }; // 臺南市's forecasts are slow today
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  E.env.pages.length = 0;
+  await E.tap("tw-weather://show?place=0&dir=left"); // never loaded before
+  assert.ok(E.env.pages[0].includes('<p class="place">臺南市東區</p><p>Loading…</p>'), E.env.pages[0].slice(-300));
+  await waitFor(() => E.env.pages.length === 2);
+  assert.match(E.env.pages[1], /<p class="place">臺南市東區<\/p>[\s\S]*class="hours"/);
+  // next time the app opens, 臺南市東區 has a saved forecast to show while the new one loads
+  E.clock.now = E.tw("2026-10-02T13:50");
+  await W.main();
+  E.env.pages.length = 0;
+  await E.tap("tw-weather://show?place=0&dir=left");
+  assert.ok(E.env.pages[0].includes("↻ Updating… (shown: 13:20)") && entered(E.env.pages[0]) === "left");
+  await waitFor(() => E.env.pages.length === 2);
+  assert.ok(!E.env.pages[1].includes("Updating…") && entered(E.env.pages[1]) === "", "no second slide-in");
+});
+
+await test("the new forecast waits while you're touching the page or searching, then appears", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  E.clock.now = E.tw("2026-10-02T13:50");
+  E.env.pages.length = 0;
+  W.CONFIG.redrawRetryMs = 40;
+  E.net.delay = { "api.open-meteo.com": 100 };
+  E.env.pageState = { y: 120, busy: true };
+  await W.main();
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(E.env.pages.length, 1, "not redrawn while busy");
+  E.env.pageState = { y: 120, busy: false };
+  await waitFor(() => E.env.pages.length === 2);
+  assert.ok(E.env.pages[1].includes("window.scrollTo(0, 120);") && !E.env.pages[1].includes("Updating…"));
+});
+
+await test("places in one session share the radar, warnings, station list and CWA rain-forecast downloads", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") }); // rain due at 15:00, so the 2.7 MB rain forecast is wanted
+  E.keychain.set("CWA_API_KEY", "KEY");
+  savePlaces(["臺北市大安區", "臺北市中山區"]);
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  await waitFor(() => fs.existsSync(E.placeFile("臺北市大安區")));
+  await E.tap("tw-weather://show?place=0&dir=left");
+  await waitFor(() => fs.existsSync(E.placeFile("臺北市中山區")));
+  await new Promise((r) => setTimeout(r, 50));
+  const count = (part, not) => E.net.log.filter((u) => u.includes(part) && !(not && u.includes(not))).length;
+  assert.equal(count("F-D0047-061?"), 3, "each place still gets its own township forecast");
+  assert.deepEqual([count("weather-maps.json"), count("O-A0058-006"), count("O-A0084-001"), count("W-C0033-001"),
+    count("O-A0001-001", "StationId="), count("F-B0046-001")], [1, 1, 1, 1, 1, 1]);
+});
+
+await test("a place that can't be loaded at all says so on its page, with Try again", async () => {
+  reset({ at: E.tw("2026-10-02T13:20"), cwa: "down", om: "down" });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.match(E.env.html, /<p class="place">My Location<\/p><p>Couldn't load the forecast\. /);
+  assert.ok(E.env.html.includes('<a href="tw-weather://show?place=here">Try again</a>'));
+  fs.writeFileSync(path.join(E.stateDir, "app-failed.html"), E.env.html);
+  E.net.cwa = "fixture"; E.net.om = "fixture";
+  await E.tap("tw-weather://show?place=here");
+  await waitFor(() => E.env.html.includes('class="hours"'));
+});
+
+await test("'Send a test' notifies now from the app, and once more from the next widget refresh", async () => {
+  reset({ at: E.tw("2026-10-02T09:20") }); // no rain due, no warnings: only the tests notify
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.ok(E.env.html.includes('href="tw-weather://test">Send a test</a>'));
+  await E.tap("tw-weather://test");
+  assert.deepEqual(E.env.notifications.map((n) => n.body), ["Notifications work. A widget will send a second test at its next refresh."]);
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  await W.main(); // only once
+  assert.deepEqual(E.env.notifications.map((n) => n.body).slice(1), ["Notifications from the widget work too."]);
+});
+
+await test("radar: the last two hours animate (RainViewer); CWA's image when RainViewer is down", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.equal((E.env.html.match(/tilecache\.rainviewer\.com\/v2\/radar\/\d+\/256\/\{z\}\/\{x\}\/\{y\}\/2\/1_1\.png/g) || []).length, 13);
+  assert.ok(E.env.html.includes('id="play"') && E.env.html.includes("radar © RainViewer"));
+  assert.ok(E.env.html.includes("RainViewer 13:20 · the blue dot is you"), "the newest frame is shown first");
+  fs.writeFileSync(path.join(E.stateDir, "app.html"), E.env.html);
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.net.rainviewer = "down";
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.ok(!E.env.html.includes('id="play"') && E.env.html.includes("O-A0058-006.png"));
+});
+
 // Results for the widget checks: a rainy afternoon, a clear night, and a worst case (long texts, stale).
 reset({ at: E.tw("2026-10-02T13:20") });
 const wet = await W.run("KEY");
@@ -531,32 +881,40 @@ await test("every widget family renders; medium shows 8 hours, large 24 hours an
   assert.match(E.texts(W.buildWidget({ ...worst, warnings: [] }, "medium")).at(-1), /^⚠︎ stale · \d\d:\d\d$/);
 });
 
-await test("widgets fit iPhone SE, 15/16 and Pro Max sizes (estimated from SF Pro metrics)", () => {
+await test("widgets fit iPhone SE, 15/16 and Pro Max sizes in English and 中文 (estimated from SF Pro metrics)", () => {
   const problems = [];
-  for (const [device, sizes] of Object.entries(DEVICES)) {
-    for (const family of FAMILIES) {
-      for (const [name, r] of Object.entries({ wet, night, worst })) {
-        const w = W.buildWidget(r, family), [width, height] = sizes[family];
-        const needH = estimateHeight(w), needW = estimateWidth(w, "v", true);
-        if (needH > height || needW > width) {
-          problems.push(`${device} ${family} (${name}): needs ${needW.toFixed(0)}×${needH.toFixed(0)}, has ${width}×${height}`);
+  for (const lang of ["en", "zh"]) {
+    W.setLang(lang);
+    for (const [device, sizes] of Object.entries(DEVICES)) {
+      for (const family of FAMILIES) {
+        for (const [name, r] of Object.entries({ wet, night, worst })) {
+          const w = W.buildWidget(r, family), [width, height] = sizes[family];
+          const needH = estimateHeight(w), needW = estimateWidth(w, "v", true);
+          if (needH > height || needW > width) {
+            problems.push(`${lang} ${device} ${family} (${name}): needs ${needW.toFixed(0)}×${needH.toFixed(0)}, has ${width}×${height}`);
+          }
         }
       }
     }
   }
+  W.setLang("en");
   assert.deepEqual(problems, []);
 });
 
 const sections = [];
-for (const [title, r] of [["Rainy afternoon (13:20)", wet], ["Clear night (23:20)", night],
-  ["Worst case: long place and condition, stale, -12°", worst]]) {
-  for (const [device, sizes] of Object.entries(DEVICES)) {
-    sections.push({ title: `${title} · ${device}`,
-      cards: FAMILIES.map((f) => widgetHTML(W.buildWidget(r, f), f, sizes[f], f)) });
+for (const lang of ["en", "zh"]) {
+  W.setLang(lang);
+  for (const [title, r] of [["Rainy afternoon (13:20)", wet], ["Clear night (23:20)", night],
+    ["Worst case: long place and condition, stale, -12°", worst]]) {
+    for (const [device, sizes] of Object.entries(DEVICES)) {
+      sections.push({ title: `${lang === "zh" ? "中文 · " : ""}${title} · ${device}`,
+        cards: FAMILIES.map((f) => widgetHTML(W.buildWidget(r, f), f, sizes[f], f)) });
+    }
   }
 }
+W.setLang("en");
 fs.writeFileSync(path.join(E.stateDir, "widgets.html"), previewPage("Taiwan Weather widget preview", sections));
-console.log("   preview: test/.state/widgets.html · in-app view: test/.state/detail.html");
+console.log("   preview: test/.state/widgets.html · full view: test/.state/app.html, app-zh.html");
 
 // ---------------- Live ----------------
 if (process.env.OFFLINE) {
@@ -577,6 +935,22 @@ if (process.env.OFFLINE) {
     console.log("   next 6h:", r2.rows.slice(0, 6).map((h) => `${h.key.slice(11)}h ${h.t.toFixed(1)}° ${h.pop == null ? "-" : Math.round(h.pop) + "%"}`).join(" | "));
     fs.writeFileSync(path.join(E.stateDir, "detail-live.html"), W.detailHTML(r2));
   });
+  await test("live RainViewer: its tiles over Taiwan come in the colours the next-hour card reads", async () => {
+    const get = async (url) => { // RainViewer's servers are in Germany: retry a stalled request
+      for (let i = 0; ; i++) try { return await fetch(url); } catch (e) { if (i === 2) throw e; }
+    };
+    const meta = await (await get("https://api.rainviewer.com/public/weather-maps.json")).json();
+    let seen = 0, odd = 0, rain = 0;
+    for (const f of meta.radar.past.slice(-3)) {
+      for (const [tx, ty] of [[106, 54], [107, 54], [106, 55], [107, 55]]) { // zoom 7 tiles over Taiwan
+        const png = decodePNG(Buffer.from(await (await get(`${meta.host}${f.path}/256/7/${tx}/${ty}/2/0_0.png`)).arrayBuffer()));
+        const d = W.radarDBZ(png.rgba, W.RAINVIEWER_COLORS);
+        seen += d.seen; odd += d.odd; rain += d.dbz.filter((v) => v >= 20).length;
+      }
+    }
+    console.log(`   last 3 frames over Taiwan: ${seen} pixels of 15+ dBZ, ${rain} of rain (20+ dBZ), ${odd} in other colours`);
+    assert.ok(odd <= 0.02 * seen, `${odd} of ${seen} radar pixels are in colours the card doesn't know`);
+  });
   if (realKey) {
     await test("live CWA: responses have every field the script reads", () => {
       const st = stationFormat(rawResponse("O-A0001-001")), fc = forecastFormat(rawResponse("F-D0047-"));
@@ -586,10 +960,12 @@ if (process.env.OFFLINE) {
     });
     await test("live: the app view's extra data (week, warnings, details, air quality, radar)", async () => {
       reset({ cwa: "live", om: "live" });
+      E.net.rainviewer = "live";
       E.keychain.set("CWA_API_KEY", realKey);
       E.setConfig({ runsInApp: true });
       await W.main();
       const r = E.readState().lastResult;
+      assert.ok(r.frames && r.frames.frames.length >= 6, "RainViewer radar frames: " + JSON.stringify(r.frames).slice(0, 200));
       assert.deepEqual(r.errors, []);
       assert.ok(r.days.length === 10 && r.days.every((d) => d.hi >= d.lo && d.wx), JSON.stringify(r.days.slice(0, 3)));
       const week = rawResponse("F-D0047-063").records.Locations[0].Location[0];
@@ -602,6 +978,29 @@ if (process.env.OFFLINE) {
         ` from ${r.details.windDir}°, ${Math.round(r.details.pressure)} hPa, ${Math.round(r.details.visibility / 1000)} km, UV ${r.details.uv},` +
         ` AQI ${r.air.aqi}, warnings: ${r.warnings.map((w) => w.title).join(", ") || "none"}, moon ${r.moon.name}`);
       fs.writeFileSync(path.join(E.stateDir, "app-live.html"), E.env.html);
+    });
+    await test("live: a saved place far from the phone (花蓮縣花蓮市) gets its own CWA forecast and station", async () => {
+      reset({ cwa: "live", om: "live" });
+      E.keychain.set("CWA_API_KEY", realKey);
+      E.scriptArgs.widgetParameter = "花蓮市";
+      E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
+      await W.main();
+      const r = JSON.parse(fs.readFileSync(E.placeFile("花蓮縣花蓮市"), "utf8")).lastResult;
+      assert.deepEqual(r.errors, []);
+      assert.ok(r.place === "花蓮縣花蓮市" && r.sources.includes("cwa") && r.station && r.station.distance < 5, JSON.stringify(r.station));
+      console.log(`   ${r.place}: now ${r.station.t}° at ${r.station.name} (${r.station.distance.toFixed(1)} km), H/L ${Math.round(r.summary.hi)}/${Math.round(r.summary.lo)}`);
+    });
+    await test("live CWA: the 降雨雷達 images and the next-hour radar forecast are where the script expects", async () => {
+      for (const radar of W.RAIN_RADARS) {
+        const meta = await (await fetch(`https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/${radar.id}?Authorization=${encodeURIComponent(realKey)}&format=JSON`)).json();
+        const ds = meta.cwaopendata.dataset, p = ds.datasetInfo.parameterSet;
+        assert.ok(ds.resource.ProductURL.endsWith(radar.id + ".png") && p.ImageDimension === "3600x3600", JSON.stringify(ds.resource));
+        assert.ok(Math.abs(p.StationLatitude - radar.latitude) < 0.006 && Math.abs(p.StationLongitude - radar.longitude) < 0.006, radar.name);
+      }
+      E.net.qpf = "live";
+      const qpf = await W.fetchQPF(E.HOME);
+      assert.ok(qpf && qpf.mm >= 0 && Date.parse(qpf.time) > Date.now() - 3 * 3600e3, JSON.stringify(qpf)); // -99 (no echo) reads as 0
+      console.log(`   CWA next-hour radar forecast at Taipei 101: ${qpf.mm} mm (issued ${qpf.time})`);
     });
     await test("live CWA: the built-in township list matches CWA's in all 22 counties (names, centres)", async () => {
       const diffs = [];

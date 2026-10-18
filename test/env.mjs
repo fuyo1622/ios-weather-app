@@ -87,6 +87,8 @@ export function stationsFixture(ms, ids) {
       Weather: "-99", Now: { Precipitation: -99 }, AirTemperature: -99 }),
     station("澎湖", "467350", 23.5655, 119.5554, "澎湖縣", "馬公市", {
       Weather: "晴", Now: { Precipitation: 0 }, AirTemperature: 27.1 }),
+    station("臺南", "467410", 22.9932, 120.2047, "臺南市", "中西區", {
+      Weather: "晴", Now: { Precipitation: 0 }, AirTemperature: 29.3 }),
   ];
   return { success: "true", records: { Station: ids ? all.filter((s) => ids.includes(s.StationId)) : all } };
 }
@@ -158,6 +160,27 @@ export function extrasFixture(ms) {
       precipitation_probability_max: days.map((t, i) => [10, 80, 20, 0, 60, 70, 10, 5, 30, 40][i]), uv_index_max: days.map(() => 7.1) },
   };
 }
+// RainViewer: 13 radar frames, 10 minutes apart, ending at the last full 10 minutes.
+export function rainviewerFixture() {
+  const last = Math.floor(clock.ms() / 600e3) * 600;
+  return { version: "2.0", host: "https://tilecache.rainviewer.com", radar: { nowcast: [],
+    past: Array.from({ length: 13 }, (_, i) => ({ time: last - (12 - i) * 600, path: "/v2/radar/" + (last - (12 - i) * 600) })) } };
+}
+// CWA's next-hour radar rain forecast, on a coarse 0.1° grid: 3.2 mm over Taipei 101, and -99 (no echo, as in the real file) elsewhere.
+export function qpfFixture() {
+  const nx = 60, ny = 80, res = 0.1, values = [];
+  for (let y = 0; y < ny; y++) {
+    for (let x = 0; x < nx; x++) {
+      const lon = 118 + x * res, lat = 20 + y * res;
+      values.push(Math.abs(lat - 25) < 0.06 && Math.abs(lon - 121.6) < 0.06 ? "3.200E+00" : "-9.900E+01"); // -99: no echo
+    }
+  }
+  return JSON.stringify({ cwaopendata: { dataid: "F-B0046-001", dataset: {
+    datasetInfo: { datasetDescription: "未來1小時雷達定量降雨預報", parameterSet: { StartPointLongitude: "118",
+      StartPointLatitude: "20", GridResolution: String(res), DateTime: iso(clock.ms()), GridDimensionX: String(nx),
+      GridDimensionY: String(ny), Precipitation: "mm" } },
+    contents: { contentDescription: "單位為mm，左下角為第一點東經118、北緯20，先依次經向遞增，再緯向遞增。", content: values.join(",") } } } });
+}
 export const airFixture = () => ({ current: { time: hk(clock.ms()) + ":00", us_aqi: 55, pm2_5: 13, pm10: 18.6 } });
 
 // [bias, noise] of each model's temperature vs truth; only some models give rain chance.
@@ -192,12 +215,37 @@ export function openMeteoFixture(url, ms) {
 // ---------------- Scriptable API mocks ----------------
 // net.cwa: "fixture" | "live" | "unauthorized" | "down";  net.om: "fixture" | "live" | "down"
 // net.cwaKey: when set, the CWA fixture only accepts that key. net.raw: last response per URL.
-export const net = { cwa: "fixture", om: "fixture", cwaKey: null, unknownTowns: [], warnings: [], log: [], raw: {} };
+// net.rainviewer: "fixture" | "live" | "down".
+// net.qpf: "fixture" | "live" | "down" (CWA's next-hour radar rain forecast, a plain file on S3).
+// net.delay: { "host part": ms } makes matching requests answer that much later, or time out after the request's
+// timeoutInterval (seconds) if that is shorter, as a stalled connection does. net.times: when each request began
+// and ended (real ms).
+export const net = { cwa: "fixture", om: "fixture", rainviewer: "fixture", qpf: "fixture", cwaKey: null, unknownTowns: [], warnings: [], log: [], raw: {},
+  delay: {}, times: [] };
+async function lag(req) {
+  const entry = { url: req.url, start: RealDate.now(), end: null };
+  net.times.push(entry);
+  const ms = Object.entries(net.delay).find(([part]) => req.url.includes(part))?.[1] || 0;
+  const limit = req.timeoutInterval * 1000;
+  if (ms) await new Promise((r) => setTimeout(r, Math.min(ms, limit)));
+  entry.end = RealDate.now();
+  if (ms > limit) throw new Error("The request timed out.");
+}
 class Request {
   constructor(url) { this.url = url; this.timeoutInterval = 60; }
   async loadJSON() {
     net.log.push(this.url);
+    await lag(this);
     return (net.raw[this.url] = await this.respond());
+  }
+  async loadString() {
+    net.log.push(this.url);
+    await lag(this);
+    if (this.url.includes("F-B0046-001")) {
+      if (net.qpf === "down") throw new Error("The request timed out.");
+      if (net.qpf === "fixture") return qpfFixture();
+    }
+    return (await fetch(this.url)).text();
   }
   async respond() {
     if (this.url.includes("opendata.cwa.gov.tw")) {
@@ -209,9 +257,13 @@ class Request {
         if (this.url.includes("O-A0001-001")) return stationsFixture(clock.ms(), q.get("StationId") && q.get("StationId").split(","));
         if (this.url.includes("W-C0033-001")) return warningsFixture(q.get("locationName"));
         if (this.url.includes("O-A0058-006")) return radarFixture();
+        if (this.url.includes("O-A0084-")) return { cwaopendata: { dataset: { DateTime: iso(clock.ms()).replace(":00:00+", ":08:00+") } } };
         if (dataset % 4 === 3) return weekFixture(clock.ms(), q.get("LocationName")); // 1-week sets: 003, 007, … 063
         return forecastFixture(clock.ms(), q.get("LocationName"));
       }
+    } else if (this.url.includes("rainviewer.com")) {
+      if (net.rainviewer === "down") throw new Error("The request timed out.");
+      if (net.rainviewer === "fixture") return rainviewerFixture();
     } else if (this.url.includes("open-meteo.com")) {
       if (net.om === "down") throw new Error("The Internet connection appears to be offline.");
       if (net.om === "fixture") {
@@ -231,7 +283,9 @@ const fileManager = {
   readString: (p) => fs.readFileSync(p, "utf8"), writeString: (p, s) => fs.writeFileSync(p, s),
 };
 export const stateFile = path.join(stateDir, "taiwan-weather", "state.json");
-export function resetState() { fs.rmSync(stateFile, { force: true }); }
+export function resetState() { fs.rmSync(path.dirname(stateFile), { recursive: true, force: true }); }
+export const placeFile = (name) => path.join(stateDir, "taiwan-weather", `place-${name}.json`);
+export const settingsFile = path.join(stateDir, "taiwan-weather", "settings.json");
 export const readState = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
 
 // Widget tree: every element records what the script set on it.
@@ -271,8 +325,18 @@ class Alert {
 }
 
 // env.geocode(lat, lon): what Apple's reverse geocoder answers (placemarks); it may throw.
+// env.pages: every page the full view drew, in order; env.pageState: what the page's pageState() answers.
 export const env = { location: HOME, geocode: () => [], geocodeCalls: 0, usedICloud: false,
-  widget: null, html: null, presented: null };
+  widget: null, html: null, presented: null, loads: 0, webview: null, notifications: [], pages: [], pageState: { y: 0, busy: false } };
+// args.widgetParameter / args.queryParameters, as Scriptable passes them.
+export const scriptArgs = { widgetParameter: null, queryParameters: {} };
+/** Taps a link in the open full view and waits for the page to be redrawn. */
+export async function tap(url) {
+  const before = env.loads;
+  const allowed = env.webview.shouldAllowRequest({ url });
+  for (let i = 0; i < 500 && env.loads === before; i++) await new Promise((r) => setTimeout(r, 2));
+  return allowed;
+}
 export const config = {};
 export function setConfig(c) { for (const k of Object.keys(config)) delete config[k]; Object.assign(config, c); }
 
@@ -291,7 +355,9 @@ const globals = {
     set: (k, v) => keychain.set(k, v), remove: (k) => keychain.delete(k),
   },
   config,
-  Script: { setWidget(w) { env.widget = w; }, complete() {} },
+  Script: { setWidget(w) { env.widget = w; }, complete() {}, name: () => "TaiwanWeather" },
+  args: scriptArgs,
+  Notification: class { async schedule() { env.notifications.push({ ...this }); } },
   ListWidget,
   Color: Object.assign(function Color(hex, alpha = 1) { this.hex = hex; this.alpha = alpha; },
     { white() { return { hex: "#ffffff", alpha: 1 }; } }),
@@ -300,7 +366,21 @@ const globals = {
   LinearGradient: function LinearGradient() { this.colors = []; this.locations = []; },
   SFSymbol: { named: (name) => (KNOWN_SYMBOLS.has(name) ? { image: { symbol: name } } : null) },
   Alert,
-  WebView: class { async loadHTML(html) { env.html = html; } async present() { env.presented = "webview"; } },
+  WebView: class {
+    constructor() { env.webview = this; }
+    async loadHTML(html) { env.html = html; env.pages.push(html); env.loads++; }
+    async present() { env.presented = "webview"; }
+    async evaluateJavaScript(js) {
+      env.evaluated = js;
+      return JSON.stringify(env.html && env.html.includes("window.pageState") ? env.pageState : { y: 0, busy: false });
+    }
+  },
+  Timer: {
+    schedule(ms, repeats, fn) {
+      const id = repeats ? setInterval(fn, ms) : setTimeout(fn, ms);
+      return { invalidate() { clearTimeout(id); clearInterval(id); } };
+    },
+  },
 };
 
 /** Evaluates TaiwanWeather.js with the mocks above and returns its functions. */
@@ -310,7 +390,9 @@ export async function loadScript() {
   const exportsLine = "\nreturn { hourKey, addHours, keyToDate, cwaElementHourly, blend, computeSkill, sourceParams," +
     " recordForecasts, recordObservation, hourlyRain, rainAcc, wxText, isNight, wxSymbol, nowText, summarize," +
     " nearestStation, nearestTown, TOWN_POINTS, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
-    " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook };";
+    " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook, findPlace, setLang, WORDS," +
+    " nowcastFrom, rainRadarPixel, RAIN_RADARS, fetchQPF, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
+    " placeholderHTML };";
   const factory = new AsyncFunction(...Object.keys(globals), src + exportsLine);
   return factory(...Object.values(globals));
 }

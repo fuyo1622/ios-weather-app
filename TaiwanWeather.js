@@ -33,6 +33,9 @@ const CONFIG = {
   maxStationKm: 25,            // farther than this from any CWA station = outside Taiwan
   historyDays: 21,             // how long verification data is kept
   hoursShown: 8,
+  abroadTimeout: 10,           // s: Open-Meteo and RainViewer (servers in Germany) can stall from Taiwan; CWA gets 20
+  swipeWaitMs: 1000,           // the full view waits this long for a new forecast, then shows the last one saved
+  redrawRetryMs: 2000,         // a redraw that would get in the way (finger on the screen…) is tried again this much later
 };
 
 // CWA county → 3-day township forecast dataset ID (F-D0047-xxx)
@@ -156,9 +159,9 @@ const MOON_PHASES = [["New Moon", "🌑"], ["Waxing Crescent", "🌒"], ["First 
 function moonPhase(date) {
   const month = 29.530588853, newMoon = Date.UTC(2000, 0, 6, 18, 14); // a known new moon
   const age = (((date - newMoon) / (24 * HOUR)) % month + month) % month;
-  const [name, emoji] = MOON_PHASES[Math.round((age / month) * 8) % 8];
+  const phase = Math.round((age / month) * 8) % 8, [name, emoji] = MOON_PHASES[phase];
   const toFull = (month / 2 - age + month) % month;
-  return { name, emoji, lit: (1 - Math.cos((2 * Math.PI * age) / month)) / 2,
+  return { phase, name, emoji, lit: (1 - Math.cos((2 * Math.PI * age) / month)) / 2,
     nextFull: new Date(date.getTime() + toFull * 24 * HOUR) };
 }
 // Feels-like temperature (Steadman's apparent temperature, as CWA's 體感溫度): °C, % humidity, m/s wind.
@@ -184,12 +187,12 @@ function compass(deg) {
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
-function storage() {
-  // On the device, not iCloud: works with iCloud Drive off or full, and each device learns its own places.
+// A JSON file in Scriptable's folder on the device (not iCloud: works with iCloud Drive off or full).
+function jsonFile(name) {
   const fm = FileManager.local();
   const dir = fm.joinPath(fm.documentsDirectory(), "taiwan-weather");
   if (!fm.fileExists(dir)) fm.createDirectory(dir, true);
-  const file = fm.joinPath(dir, "state.json");
+  const file = fm.joinPath(dir, name);
   return {
     async load() {
       try {
@@ -197,9 +200,19 @@ function storage() {
         return JSON.parse(fm.readString(file));
       } catch (e) { return null; }
     },
-    save(state) { fm.writeString(file, JSON.stringify(state)); },
+    save(data) { fm.writeString(file, JSON.stringify(data)); },
   };
 }
+// Forecast and learning state: one file for My Location, one per saved place, so each learns its own errors.
+const storage = (place) => jsonFile(place ? `place-${place.county}${place.name}.json` : "state.json");
+
+// Settings shared by the widgets and the full view.
+const DEFAULT_SETTINGS = { lang: "en", places: [], notify: { rain: true, warnings: true } };
+async function loadSettings() {
+  const s = (await jsonFile("settings.json").load()) || {};
+  return { ...DEFAULT_SETTINGS, ...s, places: [...(s.places || [])], notify: { ...DEFAULT_SETTINGS.notify, ...(s.notify || {}) } };
+}
+const saveSettings = (settings) => jsonFile("settings.json").save(settings);
 
 function emptyState() {
   // forecasts[validHour][source][bucket] = { t, pop }
@@ -211,10 +224,30 @@ function emptyState() {
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-async function getJSON(url) {
+async function getJSON(url, timeout = 20) {
   const req = new Request(url);
-  req.timeoutInterval = 20;
+  req.timeoutInterval = timeout; // seconds without an answer
   return await req.loadJSON();
+}
+
+// Downloads that are the same for every place (radar, warnings, the station list), shared by the places shown
+// in one full-view session for a few minutes. A failure isn't kept.
+const sharedDownloads = new Map();
+function shared(name, minutes, download) {
+  const hit = sharedDownloads.get(name), age = hit ? Date.now() - hit.at : Infinity;
+  if (age >= 0 && age < minutes * 60e3) return hit.promise;
+  const promise = download();
+  sharedDownloads.set(name, { at: Date.now(), promise });
+  promise.catch(() => { if (sharedDownloads.get(name)?.promise === promise) sharedDownloads.delete(name); });
+  return promise;
+}
+
+// The value of promise if it arrives within ms, else null; the promise keeps going.
+function within(promise, ms) {
+  return new Promise((done) => {
+    const timer = Timer.schedule(ms, false, () => done(null));
+    promise.then((v) => { timer.invalidate(); done(v); }, () => { timer.invalidate(); done(null); });
+  });
 }
 
 async function getLocation(state) {
@@ -269,7 +302,7 @@ function nearestStation(stations, loc) {
   return best;
 }
 
-// Readings of the stations nearest to loc. The full list (~900 stations, ~65 KB) is fetched once a
+// Readings of the stations nearest to loc. The full list (~900 stations, ~75 KB gzipped) is fetched once a
 // week; other runs ask CWA for just the 3 nearest (~1 KB), unless none of them has a reading.
 async function getStations(key, state, loc) {
   const cache = state.stations;
@@ -280,7 +313,7 @@ async function getStations(key, state, loc) {
     const near = await fetchStations(key, ids);
     if (near.some((s) => s.t != null && s.latitude != null)) return near;
   }
-  const all = await fetchStations(key);
+  const all = await shared("stations " + key, 60, () => fetchStations(key));
   state.stations = { time: new Date().toISOString(),
     list: all.filter((s) => s.latitude != null).map((s) => [s.id, s.latitude, s.longitude]) };
   return all;
@@ -307,7 +340,7 @@ async function findTown(loc, state) {
       .flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
     match = TOWN_POINTS.find((t) => names.includes(t.county) && names.includes(t.name));
   } catch (e) { /* offline or no answer: use the nearest centre */ }
-  const town = match ? { ...match, via: "Apple Maps" } : { ...nearestTown(loc), via: "nearest township centre" };
+  const town = match ? { ...match, via: "apple" } : { ...nearestTown(loc), via: "nearest" };
   state.place = { county: town.county, name: town.name, via: town.via, distance: distanceKm(loc, town),
     latitude: loc.latitude, longitude: loc.longitude };
   return state.place;
@@ -381,7 +414,7 @@ async function fetchModels(loc) {
     "&longitude=" + loc.longitude.toFixed(4) +
     "&hourly=temperature_2m,precipitation_probability,precipitation" +
     "&models=" + names.join(",") + "&forecast_days=3&past_days=1&timezone=Asia%2FTaipei";
-  const data = await getJSON(url);
+  const data = await getJSON(url, CONFIG.abroadTimeout);
   if (!data.hourly) throw new Error("Open-Meteo: " + (data.reason || "bad response"));
   const h = data.hourly;
   const out = {};
@@ -448,7 +481,8 @@ async function fetchExtras(loc) {
     "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&wind_speed_unit=ms&forecast_days=10" +
     "&current=apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m," +
     "pressure_msl,visibility,uv_index&hourly=pressure_msl,wind_gusts_10m" +
-    "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max");
+    "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max",
+    CONFIG.abroadTimeout);
   if (!data.daily || !data.current || !data.hourly) throw new Error("Open-Meteo extras: " + (data.reason || "bad response"));
   const d = data.daily, h = data.hourly;
   return {
@@ -463,7 +497,8 @@ async function fetchExtras(loc) {
 // Air quality from Open-Meteo (CAMS model, US AQI scale; Taiwan's AQI uses the same breakpoints).
 async function fetchAir(loc) {
   const data = await getJSON("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" +
-    loc.latitude.toFixed(4) + "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&current=us_aqi,pm2_5,pm10");
+    loc.latitude.toFixed(4) + "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&current=us_aqi,pm2_5,pm10",
+    CONFIG.abroadTimeout);
   if (!data.current) throw new Error("Open-Meteo air quality: " + (data.reason || "bad response"));
   return { aqi: data.current.us_aqi, pm25: data.current.pm2_5, pm10: data.current.pm10 };
 }
@@ -477,6 +512,125 @@ async function fetchRadar(key) {
   const range = (s) => s.split("-").map(Number); // "118.0-124.0"
   const p = ds.datasetInfo.parameterSet, [west, east] = range(p.LongitudeRange), [south, north] = range(p.LatitudeRange);
   return { url: ds.resource.ProductURL, time: ds.DateTime, bounds: [[south, west], [north, east]] };
+}
+
+// When each 降雨雷達 image was taken: { "O-A0084-001": "2026-10-09T09:10:00+08:00", … } (three small requests).
+async function fetchRainRadarTimes(key) {
+  const metas = await Promise.all(RAIN_RADARS.map((s) => getJSON(`https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/${s.id}` +
+    `?Authorization=${encodeURIComponent(key)}&format=JSON`).catch(() => null)));
+  return Object.fromEntries(RAIN_RADARS.map((s, i) => [s.id, metas[i] && metas[i].cwaopendata && metas[i].cwaopendata.dataset &&
+    metas[i].cwaopendata.dataset.DateTime]).filter(([, t]) => t));
+}
+
+// Radar frames from the past two hours, ten minutes apart (RainViewer, which covers Taiwan), for the map's animation.
+async function fetchRainViewer() {
+  const data = await getJSON("https://api.rainviewer.com/public/weather-maps.json", CONFIG.abroadTimeout);
+  const past = data.radar && data.radar.past;
+  if (!past || !past.length) throw new Error("RainViewer: no radar frames");
+  return { host: data.host, frames: past.map((f) => ({ time: f.time * 1000, path: f.path })) };
+}
+
+// CWA's official radar rain forecast for the next hour (QPESUMS: one total per 0.0125° cell, about 1.4 km,
+// updated every 10 minutes), as the most in any cell next to loc, so a ±1-cell offset doesn't matter.
+// The file is 2.7 MB, so only the full view fetches it, only when rain looks possible soon, and once for all places.
+async function fetchQPF(loc) {
+  const text = await shared("qpf", 10, () => {
+    const req = new Request("https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Forecast/F-B0046-001.json");
+    req.timeoutInterval = 30;
+    return req.loadString();
+  });
+  const head = text.slice(0, 5000), field = (k) => (head.match(new RegExp(`"${k}"\\s*:\\s*"([^"]+)"`)) || [])[1];
+  const res = Number(field("GridResolution")), nx = Number(field("GridDimensionX")), ny = Number(field("GridDimensionY"));
+  const first = head.match(/東經([\d.]+)、北緯([\d.]+)/); // the first cell, per the file's own description
+  const lon0 = first ? Number(first[1]) : Number(field("StartPointLongitude"));
+  const lat0 = first ? Number(first[2]) : Number(field("StartPointLatitude"));
+  if (!res || !nx || !ny) throw new Error("CWA rain forecast: bad file");
+  const x0 = Math.round((loc.longitude - lon0) / res), y0 = Math.round((loc.latitude - lat0) / res);
+  if (x0 < 1 || y0 < 1 || x0 >= nx - 1 || y0 >= ny - 1) return null;
+  // walk the comma-separated values (east first, then north) without splitting 247,000 of them
+  let pos = text.indexOf('"', text.indexOf(":", text.indexOf('"content"'))) + 1, index = 0, most = null;
+  for (const y of [y0 - 1, y0, y0 + 1]) {
+    for (const x of [x0 - 1, x0, x0 + 1]) {
+      for (; index < y * nx + x; index++) pos = text.indexOf(",", pos) + 1;
+      const end = text.indexOf(",", pos), mm = parseFloat(text.slice(pos, end < 0 ? undefined : end));
+      // -99 marks cells with no radar echo to carry forward: over Taiwan, that means no rain
+      if (Number.isFinite(mm)) most = Math.max(most ?? 0, mm < 0 ? 0 : mm);
+    }
+  }
+  return { mm: most, time: field("DateTime") };
+}
+
+// RainViewer now serves only its "Universal Blue" colours, whatever scheme is asked for (seen 2026-10-13). These
+// are its colours for 15, 16, … 65 dBZ (rainviewer.com/files/rainviewer_api_colors_table.csv). Weaker echoes are
+// see-through tan: drizzle, or clutter on a dry day.
+const RAINVIEWER_COLORS = "88ddee 6cd1eb 51c5e8 36bae5 1baee2 00a3e0 009ad5 0091ca 0088bf 007fb4 0077aa 0070a3 " +
+  "00699c 006295 005b8e 005588 005180 004e78 004a70 004768 ffee00 ffe000 ffd200 ffc500 ffb700 ffaa00 ff9f00 ff9500 " +
+  "ff8b00 ff8100 ff4400 f23600 e62800 d91b00 cd0d00 c10000 a80000 8f0000 760000 5d0000 ffaaff ff9fff ff95ff ff8bff " +
+  "ff81ff ff77ff ff6cff ff62ff ff58ff ff4eff ffffff";
+
+// dBZ for each pixel of RainViewer tiles (RGBA bytes from a canvas); see-through pixels count as 0. `odd` counts
+// opaque pixels in none of its colours, so if RainViewer changes them, the forecast says so instead of guessing.
+// Runs in the full view's page (passed in with toString()), so it must not use anything outside itself.
+function radarDBZ(px, colors) {
+  const table = colors.split(" ").map((hex) => [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)));
+  const exact = new Map(table.map(([r, g, b], i) => [(r << 16) | (g << 8) | b, 15 + i]));
+  const dbz = new Uint8Array(px.length / 4);
+  let seen = 0, odd = 0;
+  for (let i = 0; i < dbz.length; i++) {
+    if (px[i * 4 + 3] < 255) continue; // transparent: no echo; see-through: under 15 dBZ
+    seen++;
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    let v = exact.get((r << 16) | (g << 8) | b), best = 900;
+    if (v == null) { // shifted a little on the way (colour management): the nearest colour, if close
+      table.forEach(([tr, tg, tb], k) => {
+        const d = (r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2;
+        if (d < best) { best = d; v = 15 + k; }
+      });
+    }
+    if (v == null) odd++; else dbz[i] = v;
+  }
+  return { dbz, seen, odd };
+}
+
+// Rain for the next hour at the centre of three radar grids (size × size dBZ values, 10 minutes apart, oldest
+// first; the newest is ageMin minutes old): find how the rain moved between frames, then follow it forward
+// (Lagrangian persistence). Returns rain rates (mm/h) for 0, 5, … 60 minutes from now, and the motion found.
+// Runs in the full view's page (passed in with toString()), so it must not use anything outside itself.
+function nowcastFrom(frames, size, ageMin) {
+  const at = (g, x, y) => (x < 0 || y < 0 || x >= size || y >= size ? 0 : g[Math.round(y) * size + Math.round(x)]);
+  const RAIN = 20; // dBZ, about 0.6 mm/h
+  // the shift carrying grid a onto grid b with the smallest mean difference where either has rain
+  const shift = (a, b) => {
+    const reach = 14; // px per 10 minutes: up to ~90 km/h at zoom 7
+    let best = null;
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) {
+        let err = 0, n = 0;
+        for (let y = reach; y < size - reach; y += 2) {
+          for (let x = reach; x < size - reach; x += 2) {
+            const va = a[y * size + x], vb = b[(y + dy) * size + x + dx];
+            if (va < RAIN && vb < RAIN) continue;
+            err += Math.abs(va - vb); n++;
+          }
+        }
+        if (n > 20 && (!best || err / n < best.err)) best = { dx, dy, err: err / n };
+      }
+    }
+    return best;
+  };
+  const moves = [shift(frames[0], frames[1]), shift(frames[1], frames[2])].filter(Boolean);
+  const v = moves.length ? { dx: moves.reduce((s, m) => s + m.dx, 0) / moves.length, dy: moves.reduce((s, m) => s + m.dy, 0) / moves.length }
+    : { dx: 0, dy: 0 };
+  const c = size / 2, last = frames[frames.length - 1];
+  const steps = [];
+  for (let min = 0; min <= 60; min += 5) {
+    const back = (min + ageMin) / 10; // rain arriving here then is now `back` steps upstream
+    const near = [];
+    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) near.push(at(last, c - v.dx * back + ox, c - v.dy * back + oy));
+    const dbz = near.sort((a, b) => b - a)[1]; // the second highest of the 3 × 3: one stray pixel isn't rain
+    steps.push({ min, dbz, mmh: dbz >= RAIN ? Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6) : 0 }); // Marshall–Palmer
+  }
+  return { steps, motion: v, moving: moves.length > 0 };
 }
 
 // WMO weather code (Open-Meteo) → a CWA-style phrase, so wxSymbol() can draw it.
@@ -695,10 +849,13 @@ function summarize(rows, sources, station) {
 // ---------------------------------------------------------------------------
 // Main pipeline
 // ---------------------------------------------------------------------------
-async function run(apiKey) {
-  const store = storage();
+// opts.place: a saved township (an entry of TOWN_POINTS) instead of the phone's location.
+// opts.settings: when given for My Location, rain and warning notifications are sent as they apply.
+async function run(apiKey, opts = {}) {
+  const pinned = opts.place || null;
+  const store = storage(pinned);
   const state = (await store.load()) || emptyState();
-  const loc = await getLocation(state);
+  const loc = pinned ? { latitude: pinned.latitude, longitude: pinned.longitude } : await getLocation(state);
   state.lastLocation = loc;
   const nowKey = hourKey(new Date());
   const errors = [];
@@ -710,35 +867,40 @@ async function run(apiKey) {
 
   // The app view also shows ten days, details, air quality and radar; widgets skip those downloads.
   const forApp = config.runsInApp ? Promise.allSettled([fetchExtras(loc), fetchAir(loc),
-    apiKey ? fetchRadar(apiKey) : Promise.resolve(null)]) : null;
-  const [stationsRes, modelsRes, townRes] = await Promise.allSettled([
+    apiKey ? shared("radar " + apiKey, 5, () => fetchRadar(apiKey)) : Promise.resolve(null),
+    shared("rainviewer", 5, fetchRainViewer),
+    apiKey ? shared("rain radars " + apiKey, 2, () => fetchRainRadarTimes(apiKey)) : Promise.resolve({})]) : null;
+  // Open-Meteo's servers are in Germany and can stall from Taiwan, so CWA's requests don't wait for them.
+  const modelsReq = Promise.allSettled([fetchModels(loc)]);
+  const [stationsRes, townRes] = await Promise.allSettled([
     apiKey ? getStations(apiKey, state, loc) : Promise.reject(new Error("No CWA key")),
-    fetchModels(loc),
-    findTown(loc, state),
+    pinned ? { ...pinned, via: "saved", distance: 0 } : findTown(loc, state),
   ]);
+
+  // In Taiwan = a saved township, or a CWA station within reach (stations cover the mountains too), or without
+  // a key, a township centre. Outside Taiwan: no station correction and no CWA township forecast or warnings.
+  const place = townRes.value;
+  const stations = stationsRes.status === "fulfilled" ? stationsRes.value : [];
+  const inTaiwan = pinned ? true : stations.length
+    ? stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm)
+    : place.distance <= CONFIG.maxStationKm;
+  const cwaReq = stationsRes.status === "fulfilled" && inTaiwan ? Promise.allSettled([
+    fetchCWAForecast(apiKey, place.county, place.name, loc),
+    shared("warnings " + place.county, 5, () => fetchWarnings(apiKey, place.county)),
+    forApp ? fetchWeek(apiKey, place.county, place.name) : Promise.resolve(null),
+  ]) : null;
+  const [modelsRes] = await modelsReq;
 
   const sources = {};
   let station = null, town = null, warnings = [], week = null;
   if (modelsRes.status === "fulfilled") Object.assign(sources, modelsRes.value);
   else errors.push(modelsRes.reason.message);
-
-  // In Taiwan = a CWA station within reach (stations cover the mountains too); without a key, a township centre.
-  const place = townRes.value;
-  const stations = stationsRes.status === "fulfilled" ? stationsRes.value : [];
-  const inTaiwan = stations.length
-    ? stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm)
-    : place.distance <= CONFIG.maxStationKm;
   if (inTaiwan) town = place.county + place.name;
   if (stationsRes.status === "fulfilled") {
     station = nearestStation(stations, loc);
     if (station && station.distance > CONFIG.maxStationKm) station = null;
-    // Outside Taiwan: no station correction and no CWA township forecast or warnings, only the models.
-    if (inTaiwan) {
-      const [cwaRes, warnRes, weekRes] = await Promise.allSettled([
-        fetchCWAForecast(apiKey, place.county, place.name, loc),
-        fetchWarnings(apiKey, place.county),
-        forApp ? fetchWeek(apiKey, place.county, place.name) : Promise.resolve(null),
-      ]);
+    if (cwaReq) {
+      const [cwaRes, warnRes, weekRes] = await cwaReq;
       const cwa = settled(cwaRes);
       if (cwa) { sources.cwa = cwa.series; town = place.county + cwa.town; }
       warnings = settled(warnRes, []);
@@ -773,14 +935,19 @@ async function run(apiKey) {
     skill: Object.fromEntries(Object.keys(sources).map((src) => [src,
       LEAD_BUCKETS.map((_, b) => sourceParams(skill, src, b))])),
     sources: Object.keys(sources),
+    pinned: pinned && pinned.county + pinned.name,
     warnings,
     errors,
   };
   if (forApp) {
-    const [extras, air, radar] = (await forApp).map((res) => settled(res));
+    // CWA's own next-hour radar forecast, when rain looks possible within 3 hours (the file is 2.7 MB).
+    const rainLikely = rows.slice(0, 3).some((h) => h.pop >= 30) || !!(station && station.weather && station.weather.includes("雨"));
+    const qpfReq = rainLikely ? fetchQPF(loc).catch((e) => { errors.push(e.message); return null; }) : null;
+    const [extras, air, radar, frames, rainRadarTimes] = (await forApp).map((res) => settled(res));
+    const qpf = await qpfReq;
     const today = nowKey.slice(0, 10), tomorrow = addHours(today + "T00", 24).slice(0, 10);
     Object.assign(result, {
-      loc, air, radar,
+      loc, air, radar, frames, qpf, rainRadarTimes,
       days: dailyForecast(result, week, extras),
       details: currentDetails(station && station.t != null ? station.t : rows[0].t, station, extras, nowKey),
       rainToday: station && station.acc != null && station.acc >= 0 ? station.acc : null,
@@ -790,10 +957,166 @@ async function run(apiKey) {
       moon: moonPhase(new Date()),
     });
   }
+  if (!pinned && opts.settings) await notifyChanges(state, result, opts.settings);
   state.lastResult = result;
   store.save(state);
   return result;
 }
+
+// Local notifications for My Location, each sent once: rain starting within the hour (at most every 3 hours,
+// and not while the station already reports rain), and CWA warnings that weren't there on the last run.
+async function notifyChanges(state, r, settings) {
+  const sent = state.notified = state.notified || { rain: null, warnings: [] };
+  const out = [], s = r.summary, now = Date.now();
+  if (settings.notify.rain && s.nextRain) {
+    const soon = keyToDate(s.nextRain) - now <= HOUR;
+    const recent = sent.rain && now - Date.parse(sent.rain) < 3 * HOUR;
+    const raining = r.station && r.station.weather && r.station.weather.includes("雨");
+    if (soon && !recent && !raining) {
+      out.push({ id: "rain", title: T().rainSoonTitle(r.place), body: outlook({ ...r, gustMax: null }) });
+      sent.rain = new Date(now).toISOString();
+    }
+  }
+  const ids = (r.warnings || []).map((w) => w.title + "|" + w.until);
+  if (settings.notify.warnings) {
+    (r.warnings || []).forEach((w, i) => {
+      if (!sent.warnings.includes(ids[i])) {
+        out.push({ id: "warning-" + w.title, title: `⚠️ ${w.title} · ${r.place}`, body: T().warnBody(shortTime(w.until)) });
+      }
+    });
+  }
+  sent.warnings = ids;
+  for (const m of out) await sendNotification(m.id, m.title, m.body);
+  return out;
+}
+// A local notification that opens the full view when tapped; false if this context may not send one.
+async function sendNotification(id, title, body) {
+  try {
+    const n = new Notification();
+    Object.assign(n, { identifier: "taiwan-weather-" + id, threadIdentifier: "taiwan-weather", title, body,
+      openURL: "scriptable:///run/" + encodeURIComponent(Script.name()) });
+    await n.schedule();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+// "2026-10-09 23:00:00" → "10/09 23:00"
+const shortTime = (s) => String(s).slice(5, 16).replace("-", "/");
+
+// ---------------------------------------------------------------------------
+// Words: English and 繁體中文. The full view has a switch; widgets follow it.
+// ---------------------------------------------------------------------------
+const WORDS = {
+  en: {
+    now: "Now", today: "Today", tomorrow: "Tomorrow", weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    hiLo: (hi, lo) => `H${hi} L${lo}`, hiLoWide: (hi, lo) => `H:${hi}  L:${lo}`,
+    rainNowShort: (p) => `Rain now ${p}%`, rainAtShort: (tmrw, h, p) => `Rain ${tmrw ? "tmrw " : ""}~${h}:00 (${p}%)`,
+    noRainShort: "No rain next 24h", tomorrowLine: (hi, lo, pop) => `Tomorrow  H${hi} L${lo}  ·  Rain ${pop}`,
+    stale: "stale", weatherError: "Weather error: ",
+    unknownPlace: (p) => `Unknown place "${p}". Use a township, e.g. 臺南市東區.`,
+    via: { apple: "township from Apple Maps", nearest: "township from the nearest township centre", saved: "saved place" },
+    station: (name, km) => `station ${name} ${km} km`, staleBanner: "Showing the last forecast.", until: (t) => `until ${t}`,
+    noRain24: "No rain expected in the next 24 hours.", rainNowLong: (p) => `Rain now (${p}).`,
+    rainAtLong: (tmrw, h, p) => `Rain likely ${tmrw ? "tomorrow " : ""}around ${h}:00 (${p}).`,
+    gusts: (v) => ` Wind gusts up to ${v} m/s.`, sunrise: "Sunrise", sunset: "Sunset", days: (n) => `${n}-day forecast`,
+    radar: "Rain radar", radarNote: (src, t) => `${src} ${t} · the blue dot is you`, play: "Play", pause: "Pause",
+    mapOffline: "The map needs an internet connection.", radarTabs: ["Moving radar", "CWA rain radar"],
+    cwaRadarNote: (name, t) => `CWA rain radar at ${name}${t ? " " + t : ""}, every 2 minutes · the blue dot is you`,
+    nextHour: "Next hour", nhNone: "No rain in the next hour.", nhStart: "{kind} rain starting in about {min} min.",
+    nhStop: "{kind} rain stopping in about {min} min.", nhAll: "{kind} rain for the next hour.",
+    nhKinds: ["Light", "Moderate", "Heavy"], nhUnavailable: "The radar isn't available right now.",
+    nhSource: "From the last 30 minutes of radar, carried forward.", min30: "30 min", min60: "60 min",
+    qpf: (mm) => `CWA radar forecast: ${mm} mm in the next hour.`,
+    air: "Air quality", aqiLevels: ["Good", "Moderate", "Unhealthy for sensitive groups", "Unhealthy", "Very unhealthy", "Hazardous"],
+    aqiNote: (pm) => `${pm != null ? `PM2.5 ${pm} µg/m³ · ` : ""}US AQI, model estimate`,
+    uv: "UV index", uvLevels: ["Low", "Moderate", "High", "Very high", "Extreme"],
+    uvToday: (v, level) => `Today's high: ${v}, ${level.toLowerCase()}.`,
+    sunsetAt: (t) => `Sunset: ${t}`, sunriseAt: (t) => `Sunrise: ${t}`, tomorrowSunset: (t) => `Tomorrow · sunset ${t}`,
+    wind: "Wind", windSpeed: (v, force) => `${v} <small>m/s · force ${force}</small>`, from: (dir) => `From ${dir}`,
+    gust: (v) => `gusts ${v} m/s`, dirs: {},
+    rain: "Rainfall", rainToday: (v) => `${v} <small>mm today</small>`, rainNext: (v) => `${v} mm expected in the next 24 h.`,
+    feels: "Feels like", feelsSame: "Similar to the actual temperature.", feelsWarmer: "Humidity makes it feel warmer.",
+    feelsCooler: "Wind makes it feel cooler.", humidity: "Humidity", dew: (t) => `The dew point is ${t} right now.`,
+    visibility: "Visibility", km: "km", visClear: "Clear.", visHaze: "Haze is reducing visibility.", visPoor: "Poor visibility.",
+    pressure: "Pressure", hPa: "hPa", pressureTrend: { steady: "Steady", rising: "Rising", falling: "Falling" },
+    pressureNote: (trend) => `${trend} over the last 3 hours.`,
+    moon: "Moon", moonNames: ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous", "Full Moon",
+      "Waning Gibbous", "Last Quarter", "Waning Crescent"],
+    moonNote: (lit, md) => `Illumination ${lit}% · next full moon ${md}`,
+    howTitle: "How this forecast is made",
+    howText: (models) => `Each hour blends CWA's township forecast with ${models} weather models. The nearest CWA
+station pulls the next hours toward what it measures now, and every run checks earlier forecasts against the station,
+so sources that keep missing here lose weight. Temperature error (°C) per source, then samples and bias:`,
+    source: "Source", hours: (a, b) => `${a}–${b} h`,
+    footer: (t, map) => `Updated ${t} · Data: CWA 中央氣象署, Open-Meteo${map ? `, map © OpenStreetMap contributors${map === 2 ? ", radar © RainViewer" : ""}` : ""}`,
+    here: "My Location", add: "Add", addTitle: "Add a place", search: "Search a township, e.g. 東區", remove: "Remove",
+    cancel: "Cancel", settings: "Settings", language: "Language", notifications: "Notifications for My Location",
+    notifyRain: "Rain within the hour", notifyWarnings: "New CWA warnings", on: "On", off: "Off", loading: "Loading…",
+    updating: (t) => `Updating… (shown: ${t})`, loadFailed: "Couldn't load the forecast.", tryAgain: "Try again",
+    rainSoonTitle: (place) => `🌧️ Rain soon · ${place}`, warnBody: (t) => `Until ${t} · CWA`,
+    testButton: "Send a test", testTitle: "🔔 TaiwanWeather",
+    testBodyApp: "Notifications work. A widget will send a second test at its next refresh.",
+    testBodyWidget: "Notifications from the widget work too.",
+    keyTitle: "CWA API key", keyPrompt: "Paste your 授權碼 from opendata.cwa.gov.tw (會員 → 取得授權碼).",
+    keyRejected: (e) => `${e}\nPaste a new key, or Skip to keep the current one.`, save: "Save", skip: "Skip",
+  },
+  zh: {
+    now: "現在", today: "今天", tomorrow: "明天", weekdays: ["週日", "週一", "週二", "週三", "週四", "週五", "週六"],
+    hiLo: (hi, lo) => `高${hi} 低${lo}`, hiLoWide: (hi, lo) => `最高 ${hi}  最低 ${lo}`,
+    rainNowShort: (p) => `正在下雨 ${p}%`, rainAtShort: (tmrw, h, p) => `${tmrw ? "明天 " : ""}${h}:00 可能下雨 ${p}%`,
+    noRainShort: "24 小時內無雨", tomorrowLine: (hi, lo, pop) => `明天  高${hi} 低${lo}  ·  降雨 ${pop}`,
+    stale: "舊資料", weatherError: "天氣錯誤：",
+    unknownPlace: (p) => `找不到「${p}」。請輸入鄉鎮市區，例如 臺南市東區。`,
+    via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點" },
+    station: (name, km) => `測站 ${name} ${km} 公里`, staleBanner: "顯示上一次的預報。", until: (t) => `至 ${t}`,
+    noRain24: "未來 24 小時預計不會下雨。", rainNowLong: (p) => `現在正在下雨（${p}）。`,
+    rainAtLong: (tmrw, h, p) => `${tmrw ? "明天 " : ""}${h}:00 左右可能下雨（${p}）。`,
+    gusts: (v) => `陣風最大每秒 ${v} 公尺。`, sunrise: "日出", sunset: "日落", days: (n) => `${n} 天預報`,
+    radar: "雷達回波", radarNote: (src, t) => `${src} ${t} · 藍點是你的位置`, play: "播放", pause: "暫停",
+    mapOffline: "地圖需要網路連線。", radarTabs: ["動態雷達", "降雨雷達"],
+    cwaRadarNote: (name, t) => `氣象署降雨雷達（${name}）${t ? " " + t : ""}，每 2 分鐘更新 · 藍點是你的位置`,
+    nextHour: "未來一小時", nhNone: "未來一小時不會下雨。", nhStart: "約 {min} 分鐘後開始下{kind}。",
+    nhStop: "{kind}約 {min} 分鐘後停。", nhAll: "未來一小時都會下{kind}。",
+    nhKinds: ["小雨", "中雨", "大雨"], nhUnavailable: "目前無法取得雷達資料。",
+    nhSource: "依過去 30 分鐘的雷達回波推估。", min30: "30 分", min60: "60 分",
+    qpf: (mm) => `氣象署雷達預報：未來一小時 ${mm} 毫米。`,
+    air: "空氣品質", aqiLevels: ["良好", "普通", "對敏感族群不健康", "對所有族群不健康", "非常不健康", "危害"],
+    aqiNote: (pm) => `${pm != null ? `PM2.5 ${pm} µg/m³ · ` : ""}美國 AQI 標準，模式估計`,
+    uv: "紫外線指數", uvLevels: ["低量級", "中量級", "高量級", "過量級", "危險級"],
+    uvToday: (v, level) => `今日最高 ${v}，${level}。`,
+    sunsetAt: (t) => `日落 ${t}`, sunriseAt: (t) => `日出 ${t}`, tomorrowSunset: (t) => `明天 · 日落 ${t}`,
+    wind: "風", windSpeed: (v, force) => `${v} <small>公尺/秒 · ${force} 級</small>`, from: (dir) => `${dir}風`,
+    gust: (v) => `陣風 ${v} 公尺/秒`,
+    dirs: { N: "北", NNE: "北北東", NE: "東北", ENE: "東北東", E: "東", ESE: "東南東", SE: "東南", SSE: "南南東", S: "南",
+      SSW: "南南西", SW: "西南", WSW: "西南西", W: "西", WNW: "西北西", NW: "西北", NNW: "北北西" },
+    rain: "降雨量", rainToday: (v) => `${v} <small>毫米（今天）</small>`, rainNext: (v) => `未來 24 小時預計 ${v} 毫米。`,
+    feels: "體感溫度", feelsSame: "與實際溫度相近。", feelsWarmer: "濕度讓體感更熱。", feelsCooler: "風讓體感更涼。",
+    humidity: "濕度", dew: (t) => `目前露點 ${t}。`,
+    visibility: "能見度", km: "公里", visClear: "視野清晰。", visHaze: "霾害降低能見度。", visPoor: "能見度差。",
+    pressure: "氣壓", hPa: "百帕", pressureTrend: { steady: "穩定", rising: "上升", falling: "下降" },
+    pressureNote: (trend) => `過去 3 小時${trend}。`,
+    moon: "月相", moonNames: ["新月", "眉月", "上弦月", "盈凸月", "滿月", "虧凸月", "下弦月", "殘月"],
+    moonNote: (lit, md) => `亮度 ${lit}% · 下次滿月 ${md}`,
+    howTitle: "預報怎麼來的",
+    howText: (models) => `每小時的預報結合中央氣象署的鄉鎮預報與 ${models} 個數值模式。最近的氣象站把接下來幾小時拉向它現在的
+實測值；每次執行都會用測站資料檢查先前的預報，在這裡常常不準的來源，權重就會降低。各來源的溫度誤差（°C），以及樣本數與偏差：`,
+    source: "來源", hours: (a, b) => `${a}–${b} 小時`,
+    footer: (t, map) => `更新 ${t} · 資料：中央氣象署、Open-Meteo${map ? `，地圖 © OpenStreetMap 貢獻者${map === 2 ? "，雷達 © RainViewer" : ""}` : ""}`,
+    here: "目前位置", add: "新增", addTitle: "新增地點", search: "搜尋鄉鎮市區，例如 東區", remove: "移除",
+    cancel: "取消", settings: "設定", language: "語言", notifications: "目前位置的通知",
+    notifyRain: "一小時內下雨", notifyWarnings: "新的天氣特報", on: "開", off: "關", loading: "載入中…",
+    updating: (t) => `更新中…（目前顯示 ${t} 的預報）`, loadFailed: "無法載入預報。", tryAgain: "再試一次",
+    rainSoonTitle: (place) => `🌧️ 即將下雨 · ${place}`, warnBody: (t) => `至 ${t} · 中央氣象署`,
+    testButton: "傳送測試通知", testTitle: "🔔 TaiwanWeather",
+    testBodyApp: "通知正常。小工具下次更新時會再傳一則測試。", testBodyWidget: "小工具的通知也正常。",
+    keyTitle: "CWA 授權碼", keyPrompt: "請貼上氣象資料開放平臺的授權碼（會員 → 取得授權碼）。",
+    keyRejected: (e) => `${e}\n請貼上新的授權碼，或按「略過」保留目前的。`, save: "儲存", skip: "略過",
+  },
+};
+let LANG = "en";
+const setLang = (lang) => { LANG = WORDS[lang] ? lang : "en"; };
+const T = () => WORDS[LANG];
 
 // ---------------------------------------------------------------------------
 // UI
@@ -838,11 +1161,12 @@ function addText(stack, str, size, opts = {}) {
 function nowText(r) {
   const s = r.summary;
   if (s.nextRain) {
-    if (keyToDate(s.nextRain) <= Date.now()) return `Rain now ${Math.round(s.nextRainPop)}%`; // that hour has begun
-    const day = s.nextRain.slice(0, 10) === hourKey(new Date()).slice(0, 10) ? "" : "tmrw ";
-    return `Rain ${day}~${fmtHour(s.nextRain)}:00 (${Math.round(s.nextRainPop)}%)`;
+    const pop = Math.round(s.nextRainPop);
+    if (keyToDate(s.nextRain) <= Date.now()) return T().rainNowShort(pop); // that hour has begun
+    const tmrw = s.nextRain.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
+    return T().rainAtShort(tmrw, fmtHour(s.nextRain), pop);
   }
-  return "No rain next 24h";
+  return T().noRainShort;
 }
 
 // One column per hour: rows[first], rows[first + step], ... (n columns).
@@ -872,8 +1196,12 @@ function buildWidget(r, family) {
   const cur = r.station && r.station.t != null ? r.station.t : r.rows[0].t;
   const wx = (r.station && r.station.weather) || r.rows[0].wx;
   const symbol = wxSymbol(wx, r.rows[0].pop, r.rows[0].night);
-  const hiLo = `H${fmtT(r.summary.hi)} L${fmtT(r.summary.lo)}`;
+  const hiLo = T().hiLo(fmtT(r.summary.hi), fmtT(r.summary.lo));
   w.refreshAfterDate = new Date(Date.now() + 30 * 60e3);
+  // A tap opens the full view (a pinned widget's on its place). Set here, it works whatever the widget's
+  // "When Interacting" option says; Scriptable's default, Open App, only opens the app.
+  const open = "scriptable:///run/" + encodeURIComponent(Script.name());
+  w.url = r.pinned ? `${open}?place=${encodeURIComponent(r.pinned)}` : open;
 
   if (family === "accessoryCircular") {
     w.addAccessoryWidgetBackground = true;
@@ -928,7 +1256,7 @@ function buildWidget(r, family) {
       const t = r.summary.tomorrow;
       if (t) {
         w.addSpacer(8);
-        addText(w, `Tomorrow  H${fmtT(t.hi)} L${fmtT(t.lo)}  ·  Rain ${t.pop == null ? "–" : Math.round(t.pop) + "%"}`,
+        addText(w, T().tomorrowLine(fmtT(t.hi), fmtT(t.lo), t.pop == null ? "–" : Math.round(t.pop) + "%"),
           12, { color: C.dim, minScale: 0.7 });
       }
     } else {
@@ -937,9 +1265,9 @@ function buildWidget(r, family) {
   }
   w.addSpacer();
   const time = new Date(r.updated).toTimeString().slice(0, 5);
-  if (warning) addText(w, `${r.stale ? "stale · " : ""}${warning} · ${time}`, 9, { color: C.warn, minScale: 0.7 });
+  if (warning) addText(w, `${r.stale ? T().stale + " · " : ""}${warning} · ${time}`, 9, { color: C.warn, minScale: 0.7 });
   else {
-    addText(w, `${r.stale ? "⚠︎ stale · " : ""}${time}` +
+    addText(w, `${r.stale ? `⚠︎ ${T().stale} · ` : ""}${time}` +
       (r.station ? ` · ${r.station.name} ${r.station.distance.toFixed(1)}km` : ""), 9, { color: C.dim, minScale: 0.8 });
   }
   return w;
@@ -950,14 +1278,33 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const EMOJI = { "sun.max.fill": "☀️", "moon.stars.fill": "🌙", "cloud.sun.fill": "⛅", "cloud.moon.fill": "☁️",
   "cloud.fill": "☁️", "cloud.rain.fill": "🌧️", "cloud.drizzle.fill": "🌦️", "cloud.bolt.rain.fill": "⛈️",
   "cloud.fog.fill": "🌫️", "cloud.snow.fill": "🌨️" };
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const AQI_LEVELS = [[50, "Good", "#4cd964"], [100, "Moderate", "#ffcc00"], [150, "Unhealthy for sensitive groups", "#ff9500"],
-  [200, "Unhealthy", "#ff3b30"], [300, "Very unhealthy", "#af52de"], [Infinity, "Hazardous", "#8e1b3a"]];
-const UV_LEVELS = [[2, "Low"], [5, "Moderate"], [7, "High"], [10, "Very high"], [Infinity, "Extreme"]];
-const levelOf = (levels, v) => levels.find(([max]) => v <= max);
+// CWA's 降雨雷達 (C-band, every 2 minutes). Each image is 3600 px square, centred on its radar, at 1779 px per
+// 150 km (measured from the range rings and checked against the coastline to about 1 km).
+const RAIN_RADARS = [
+  { name: "樹林", id: "O-A0084-001", latitude: 25.00, longitude: 121.40 },
+  { name: "南屯", id: "O-A0084-002", latitude: 24.14, longitude: 120.58 },
+  { name: "林園", id: "O-A0084-003", latitude: 22.53, longitude: 120.38 },
+];
+// Where loc falls on a 降雨雷達 image, in pixels from its top-left corner.
+function rainRadarPixel(radar, loc) {
+  const k = 1779 / 150, rad = Math.PI / 180;
+  const north = 6371 * (loc.latitude - radar.latitude) * rad;
+  const east = 6371 * (loc.longitude - radar.longitude) * rad * Math.cos(((loc.latitude + radar.latitude) / 2) * rad);
+  return [1799.5 + east * k, 1799.5 - north * k];
+}
+
+// Upper limits of each level (names in WORDS): AQI with its colour, and UV.
+const AQI_LEVELS = [[50, "#4cd964"], [100, "#ffcc00"], [150, "#ff9500"], [200, "#ff3b30"], [300, "#af52de"], [Infinity, "#8e1b3a"]];
+const UV_LEVELS = [2, 5, 7, 10, Infinity];
+const levelOf = (limits, v) => limits.findIndex((x) => v <= (Array.isArray(x) ? x[0] : x));
 const hm = (minutes) => {
   const m = Math.round(minutes);
   return `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
+// An ISO time as Taiwan's "HH:MM", with the date ("10/12 21:05") when it isn't today.
+const twTime = (iso) => {
+  const t = new Date(Date.parse(iso) + 8 * HOUR).toISOString(), today = new Date(Date.now() + 8 * HOUR).toISOString();
+  return (t.slice(0, 10) === today.slice(0, 10) ? "" : t.slice(5, 10).replace("-", "/") + " ") + t.slice(11, 16);
 };
 // Colour for a temperature on the ten-day bars: blue (cold) → green → yellow → orange → red (hot).
 function tempColor(t) {
@@ -971,18 +1318,20 @@ function tempColor(t) {
 // One sentence for the top of the hourly card, like the Weather app's.
 function outlook(r) {
   const s = r.summary;
-  let text = "No rain expected in the next 24 hours.";
+  let text = T().noRain24;
   if (s.nextRain) {
     const pop = Math.round(s.nextRainPop) + "%";
-    const day = s.nextRain.slice(0, 10) === hourKey(new Date()).slice(0, 10) ? "" : "tomorrow ";
-    text = keyToDate(s.nextRain) <= Date.now() ? `Rain now (${pop}).` : `Rain likely ${day}around ${fmtHour(s.nextRain)}:00 (${pop}).`;
+    const tmrw = s.nextRain.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
+    text = keyToDate(s.nextRain) <= Date.now() ? T().rainNowLong(pop) : T().rainAtLong(tmrw, fmtHour(s.nextRain), pop);
   }
-  if (r.gustMax >= 10.8) text += ` Wind gusts up to ${Math.round(r.gustMax)} m/s.`; // Beaufort 6 and up
+  if (r.gustMax >= 10.8) text += T().gusts(Math.round(r.gustMax)); // Beaufort 6 and up
   return text;
 }
 
-// The app view: what opens when you tap a widget or run the script in Scriptable.
-function detailHTML(r) {
+// The full view: what opens when you tap a widget or run the script in Scriptable. Links to tw-weather://…
+// (places, language, notifications) are handled by main(). ui = { settings, current: "here" or a place index }.
+function detailHTML(r, ui = {}) {
+  const w = T(), settings = ui.settings || DEFAULT_SETTINGS, places = settings.places || [];
   const now = r.rows[0], cur = r.station && r.station.t != null ? r.station.t : now.t;
   const wx = (r.station && r.station.weather) || now.wx || "";
   const symbol = wxSymbol(wx, now.pop, now.night);
@@ -993,14 +1342,28 @@ function detailHTML(r) {
   const d = r.details || {};
   const card = (title, body, cls = "") => `<section class="card ${cls}">${title ? `<h2>${title}</h2>` : ""}${body}</section>`;
   const tile = (title, big, note) => `<section class="tile"><h3>${title}</h3><p class="big">${big}</p><p>${note}</p></section>`;
+  const act = (path) => `tw-weather://${path}`;
+
+  // Swiping, or the dots at the bottom, moves between My Location and the saved places, as in the Weather app.
+  const order = ["here", ...places.map((_, i) => i)], at = Math.max(0, order.indexOf(ui.current ?? "here"));
+  const dots = order.length < 2 ? "" : `<nav class="dots">${order.map((p, i) =>
+    `<a class="dot${i === at ? " on" : ""}" href="${act(`show?place=${p}&dir=${i > at ? "left" : "right"}`)}" ` +
+    `aria-label="${p === "here" ? w.here : esc(places[p].county + places[p].name)}">${p === "here" ? "➤" : "●"}</a>`).join("")}</nav>`;
+
+  // Places: My Location, saved townships (the current one can be removed), and Add.
+  const current = ui.current ?? "here";
+  const chips = [`<a class="chip${current === "here" ? " on" : ""}" href="${act("show?place=here")}">📍 ${w.here}</a>`,
+    ...places.map((p, i) => `<a class="chip${current === i ? " on" : ""}" href="${act("show?place=" + i)}">${esc(p.county + p.name)}</a>` +
+      (current === i ? `<a class="chip x" href="${act("remove?place=" + i)}" aria-label="${w.remove}">✕</a>` : "")),
+    `<button class="chip" id="add" type="button">＋ ${w.add}</button>`].join("");
 
   // Hourly strip, with sunrise and sunset slotted in where they fall.
-  const events = (r.sun || []).flatMap((s) => [[s.day, s.rise, "🌅", "Sunrise"], [s.day, s.set, "🌇", "Sunset"]]);
+  const events = (r.sun || []).flatMap((s) => [[s.day, s.rise, "🌅", w.sunrise], [s.day, s.set, "🌇", w.sunset]]);
   const hours = r.rows.slice(0, 25).flatMap((h, i) => {
     const day = h.key.slice(0, 10), hour = Number(fmtHour(h.key));
     const sun = events.filter(([on, m]) => on === day && Math.floor(m / 60) === hour && !(on === today && m < minuteNow))
       .map(([, m, e, label]) => `<li class="sun"><span>${hm(m)}</span><b>${e}</b><small></small><span>${label}</span></li>`);
-    return [`<li><span>${i ? fmtHour(h.key) : "Now"}</span><b>${EMOJI[i ? wxSymbol(h.wx, h.pop, h.night) : symbol]}</b>` +
+    return [`<li><span>${i ? fmtHour(h.key) : w.now}</span><b>${EMOJI[i ? wxSymbol(h.wx, h.pop, h.night) : symbol]}</b>` +
       `<small>${h.pop != null && h.pop >= 20 ? Math.round(h.pop) + "%" : ""}</small><span>${fmtT(i ? h.t : cur)}</span></li>`, ...sun];
   }).join("");
 
@@ -1009,7 +1372,7 @@ function detailHTML(r) {
   const lo = Math.min(...days.map((x) => x.lo)), hi = Math.max(...days.map((x) => x.hi)), span = Math.max(1, hi - lo);
   const pct = (t) => (((Math.min(hi, Math.max(lo, t)) - lo) / span) * 100).toFixed(1);
   const dayRows = days.map((x, i) => {
-    const name = i ? WEEKDAYS[new Date(Date.parse(x.day + "T12:00:00+08:00")).getUTCDay()] : "Today";
+    const name = i ? w.weekdays[new Date(Date.parse(x.day + "T12:00:00+08:00")).getUTCDay()] : w.today;
     const dot = i === 0 && cur != null ? `<em style="left:${pct(cur)}%"></em>` : "";
     return `<li><span>${name}</span><b>${EMOJI[wxSymbol(x.wx, x.pop, false)]}<small>${x.pop >= 20 ? Math.round(x.pop) + "%" : ""}</small></b>` +
       `<span class="lo">${fmtT(x.lo)}</span><span class="bar"><i style="left:${pct(x.lo)}%;right:${(100 - pct(x.hi)).toFixed(1)}%;` +
@@ -1019,77 +1382,102 @@ function detailHTML(r) {
   // Detail tiles; each appears only when its data came in.
   const tiles = [];
   if (r.air && r.air.aqi != null) {
-    const [, label, color] = levelOf(AQI_LEVELS, r.air.aqi);
-    tiles.push(tile("🫁 Air quality", `${Math.round(r.air.aqi)} <small>${label}</small>`,
-      `<span class="scale aqi"><em style="left:${Math.min(100, r.air.aqi / 3).toFixed(1)}%;border-color:${color}"></em></span>` +
-      (r.air.pm25 != null ? `PM2.5 ${Math.round(r.air.pm25)} µg/m³ · ` : "") + "US AQI, model estimate"));
+    const level = levelOf(AQI_LEVELS, r.air.aqi);
+    tiles.push(tile(`🫁 ${w.air}`, `${Math.round(r.air.aqi)} <small>${w.aqiLevels[level]}</small>`,
+      `<span class="scale aqi"><em style="left:${Math.min(100, r.air.aqi / 3).toFixed(1)}%;border-color:${AQI_LEVELS[level][1]}"></em></span>` +
+      w.aqiNote(r.air.pm25 != null ? Math.round(r.air.pm25) : null)));
   }
   if (d.uv != null) {
     const max = days[0] && days[0].uv;
-    tiles.push(tile("😎 UV index", `${Math.round(d.uv)} <small>${levelOf(UV_LEVELS, d.uv)[1]}</small>`,
+    tiles.push(tile(`😎 ${w.uv}`, `${Math.round(d.uv)} <small>${w.uvLevels[levelOf(UV_LEVELS, d.uv)]}</small>`,
       `<span class="scale uv"><em style="left:${Math.min(100, d.uv * 9)}%"></em></span>` +
-      (max != null ? `Today's high: ${Math.round(max)}, ${levelOf(UV_LEVELS, max)[1].toLowerCase()}.` : "")));
+      (max != null ? w.uvToday(Math.round(max), w.uvLevels[levelOf(UV_LEVELS, max)]) : "")));
   }
   if (r.sun && r.sun.length === 2) {
     const [t0, t1] = r.sun;
-    tiles.push(minuteNow < t0.rise ? tile("🌅 Sunrise", hm(t0.rise), `Sunset: ${hm(t0.set)}`)
-      : minuteNow > t0.set ? tile("🌅 Sunrise", hm(t1.rise), `Tomorrow · sunset ${hm(t1.set)}`)
-      : tile("🌇 Sunset", hm(t0.set), `Sunrise: ${hm(t0.rise)}`));
+    tiles.push(minuteNow < t0.rise ? tile(`🌅 ${w.sunrise}`, hm(t0.rise), w.sunsetAt(hm(t0.set)))
+      : minuteNow > t0.set ? tile(`🌅 ${w.sunrise}`, hm(t1.rise), w.tomorrowSunset(hm(t1.set)))
+      : tile(`🌇 ${w.sunset}`, hm(t0.set), w.sunriseAt(hm(t0.rise))));
   }
   if (d.wind != null) {
-    const arrow = d.windDir != null ? `<i class="arrow" style="transform:rotate(${Math.round(d.windDir + 180)}deg)">↑</i>` : "";
-    tiles.push(tile("🌬️ Wind", `${d.wind.toFixed(1)} <small>m/s · force ${beaufort(d.wind)}</small>`,
-      `${arrow}${d.windDir != null ? "From " + compass(d.windDir) : ""}${d.windDir != null && d.gust != null ? " · " : ""}` +
-      `${d.gust != null ? "gusts " + d.gust.toFixed(1) + " m/s" : ""}`));
+    const dir = d.windDir != null ? compass(d.windDir) : null;
+    const arrow = dir ? `<i class="arrow" style="transform:rotate(${Math.round(d.windDir + 180)}deg)">↑</i>` : "";
+    tiles.push(tile(`🌬️ ${w.wind}`, w.windSpeed(d.wind.toFixed(1), beaufort(d.wind)),
+      arrow + [dir && w.from(w.dirs[dir] || dir), d.gust != null && w.gust(d.gust.toFixed(1))].filter(Boolean).join(" · ")));
   }
   if (r.rainToday != null || r.rainNext24 != null) {
-    tiles.push(tile("💧 Rainfall", `${(r.rainToday || 0).toFixed(1)} <small>mm today</small>`,
-      `${(r.rainNext24 || 0).toFixed(1)} mm expected in the next 24 h.`));
+    tiles.push(tile(`💧 ${w.rain}`, w.rainToday((r.rainToday || 0).toFixed(1)), w.rainNext((r.rainNext24 || 0).toFixed(1))));
   }
   if (d.feels != null && cur != null) {
     const gap = d.feels - cur;
-    tiles.push(tile("🌡️ Feels like", fmtT(d.feels), Math.abs(gap) < 1 ? "Similar to the actual temperature."
-      : gap > 0 ? "Humidity makes it feel warmer." : "Wind makes it feel cooler."));
+    tiles.push(tile(`🌡️ ${w.feels}`, fmtT(d.feels), Math.abs(gap) < 1 ? w.feelsSame : gap > 0 ? w.feelsWarmer : w.feelsCooler));
   }
-  if (d.rh != null) {
-    tiles.push(tile("💦 Humidity", `${Math.round(d.rh)}%`, d.dew != null ? `The dew point is ${fmtT(d.dew)} right now.` : ""));
-  }
+  if (d.rh != null) tiles.push(tile(`💦 ${w.humidity}`, `${Math.round(d.rh)}%`, d.dew != null ? w.dew(fmtT(d.dew)) : ""));
   if (d.visibility != null) {
     const km = d.visibility / 1000;
-    tiles.push(tile("👁️ Visibility", `${km >= 10 ? Math.round(km) : km.toFixed(1)} <small>km</small>`,
-      km >= 10 ? "Clear." : km >= 4 ? "Haze is reducing visibility." : "Poor visibility."));
+    tiles.push(tile(`👁️ ${w.visibility}`, `${km >= 10 ? Math.round(km) : km.toFixed(1)} <small>${w.km}</small>`,
+      km >= 10 ? w.visClear : km >= 4 ? w.visHaze : w.visPoor));
   }
   if (d.pressure != null) {
-    const c = d.pressureChange, trend = c == null || Math.abs(c) < 0.5 ? "Steady" : c > 0 ? "Rising" : "Falling";
-    tiles.push(tile("🧭 Pressure", `${Math.round(d.pressure)} <small>hPa</small>`, `${trend} over the last 3 hours.`));
+    const c = d.pressureChange, trend = c == null || Math.abs(c) < 0.5 ? "steady" : c > 0 ? "rising" : "falling";
+    tiles.push(tile(`🧭 ${w.pressure}`, `${Math.round(d.pressure)} <small>${w.hPa}</small>`, w.pressureNote(w.pressureTrend[trend])));
   }
   if (r.moon) {
     const full = new Date(new Date(r.moon.nextFull).getTime() + 8 * HOUR);
-    tiles.push(tile(`${r.moon.emoji} Moon`, r.moon.name,
-      `Illumination ${Math.round(r.moon.lit * 100)}% · next full moon ${full.getUTCMonth() + 1}/${full.getUTCDate()}`));
+    tiles.push(tile(`${r.moon.emoji} ${w.moon}`, w.moonNames[r.moon.phase ?? 0],
+      w.moonNote(Math.round(r.moon.lit * 100), `${full.getUTCMonth() + 1}/${full.getUTCDate()}`)));
   }
 
-  const radar = r.radar && r.loc ? card("🛰️ Rain radar", `<div id="map"></div><p class="note">CWA radar ` +
-    `${esc(String(r.radar.time).slice(11, 16))} · the blue dot is you</p>`) : "";
+  // Radar: RainViewer's last two hours as an animation, else CWA's latest image.
+  const frames = r.frames && r.frames.frames.length ? r.frames.frames.map((f) => ({
+    url: `${r.frames.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, time: hm(((f.time / 60000) + 8 * 60) % 1440) })) : [];
+  const cwaRadar = r.radar && r.radar.url ? { url: r.radar.url, bounds: r.radar.bounds, time: String(r.radar.time).slice(11, 16) } : null;
+  const mapSource = frames.length ? 2 : cwaRadar ? 1 : 0;
+  // CWA's 降雨雷達 as a second tab, nearest radar first; its image (about 1 MB) loads only when opened.
+  const rainRadars = r.loc ? RAIN_RADARS.map((s) => ({ name: s.name, km: distanceKm(r.loc, s), px: rainRadarPixel(s, r.loc),
+    url: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/${s.id}.png`,
+    time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16) })).sort((a, b) => a.km - b.km) : [];
+  const radar = mapSource && r.loc ? card(`🛰️ ${w.radar}`,
+    `<div class="tabs"><button type="button" class="on" data-tab="move">${w.radarTabs[0]}</button>` +
+    `<button type="button" data-tab="cwa">${w.radarTabs[1]}</button></div><div id="map"></div>` +
+    `<div id="cwa-view" hidden><div class="tabs" id="stations">${rainRadars.map((s, i) =>
+      `<button type="button" data-i="${i}"${i ? "" : ' class="on"'}>${s.name}</button>`).join("")}</div>` +
+    `<div id="cwa-map"></div><p class="note" id="cwa-note">${esc(w.cwaRadarNote(rainRadars[0].name, rainRadars[0].time))}</p></div>` +
+    `<p class="note" id="radar-note">` + (frames.length ? `<button id="play" type="button">▶︎ ${w.play}</button> ` : "") +
+    `<span id="radar-time">${esc(w.radarNote(frames.length ? "RainViewer" : w.radar, frames.length ? frames[frames.length - 1].time : cwaRadar.time))}</span></p>`) : "";
+  // The next hour, worked out in the page from RainViewer's last three frames, their colours read back as dBZ.
+  const nextHour = frames.length >= 3 && r.loc ? card(`☔ ${w.nextHour}`, `<p class="summary" id="nh-text">${w.loading}</p>` +
+    `<div class="nh-chart" id="nh-chart"></div><p class="nh-axis"><span>${w.now}</span><span>${w.min30}</span><span>${w.min60}</span></p>` +
+    `<p class="note">${w.nhSource}${r.qpf && r.qpf.mm != null ? " " + w.qpf(r.qpf.mm.toFixed(1)) : ""}</p>`) : "";
+  const nhWords = { none: w.nhNone, start: w.nhStart, stop: w.nhStop, all: w.nhAll, kinds: w.nhKinds, unavailable: w.nhUnavailable };
+
   const srcNames = { cwa: "CWA 鄉鎮預報" };
   const skillRows = Object.entries(r.skill).map(([src, buckets]) =>
     `<tr><td>${srcNames[src] || src}</td>${buckets.map((p) =>
       `<td>${p.mae.toFixed(2)}° <small>${p.n}${p.n ? `, ${p.bias >= 0 ? "+" : ""}${p.bias.toFixed(1)}` : ""}</small></td>`).join("")}</tr>`).join("");
-  const warnings = (r.warnings || []).map((w) =>
-    `<p><b>⚠️ ${esc(w.title)}</b> <span>until ${esc(String(w.until).slice(5, 16).replace("-", "/"))}</span></p>`).join("");
+  const warnings = (r.warnings || []).map((x) =>
+    `<p><b>⚠️ ${esc(x.title)}</b> <span>${w.until(esc(shortTime(x.until)))}</span></p>`).join("");
   const models = r.sources.filter((s) => s !== "cwa").length;
+  const toggle = (key, label) => `<p class="row"><span>${label}</span><a class="seg-btn${settings.notify[key] ? " on" : ""}" ` +
+    `href="${act(`notify?${key}=${settings.notify[key] ? 0 : 1}`)}">${settings.notify[key] ? w.on : w.off}</a></p>`;
+  const townNames = TOWN_POINTS.map((t) => t.county + t.name);
 
-  return `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  return `<html lang="${LANG === "zh" ? "zh-Hant-TW" : "en"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 ${radar ? `<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">` : ""}
 <style>
 :root { color-scheme: dark; --glass: rgba(10, 20, 40, .28); --line: rgba(255, 255, 255, .16); --dim: rgba(255, 255, 255, .64); }
+[hidden] { display: none !important; }
 body { margin: 0; color: #fff; font: 16px/1.35 -apple-system, system-ui, sans-serif; min-height: 100vh;
   background: #2f6fbd; background-attachment: fixed; }
 .clear-day { background-image: linear-gradient(#2f6fd0, #5aa9e6); } .cloudy-day { background-image: linear-gradient(#5b7590, #8ea4ba); }
 .rain-day { background-image: linear-gradient(#45566b, #73849a); } .clear-night { background-image: linear-gradient(#0a1631, #1f3d72); }
 .cloudy-night, .rain-night { background-image: linear-gradient(#121a28, #2c3a51); }
-main { max-width: 560px; margin: 0 auto; padding: max(20px, env(safe-area-inset-top)) 16px 40px; display: grid; gap: 12px; }
-.hero { text-align: center; padding: 8px 0 14px; text-shadow: 0 1px 6px rgba(0, 0, 0, .18); }
+main { max-width: 560px; margin: 0 auto; padding: max(14px, env(safe-area-inset-top)) 16px 64px; display: grid; gap: 12px; }
+.places { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+.chip { flex: 0 0 auto; color: #fff; text-decoration: none; font: 14px -apple-system, system-ui, sans-serif; padding: 6px 12px;
+  border-radius: 16px; background: var(--glass); border: 0; } .chip.on { background: rgba(255, 255, 255, .28); } .chip.x { padding: 6px 10px; }
+.hero { text-align: center; padding: 4px 0 14px; text-shadow: 0 1px 6px rgba(0, 0, 0, .18); }
 .hero p { margin: 0; } .place { font-size: 28px; } .via { color: var(--dim); font-size: 12px; min-height: 16px; }
 .temp { font-size: 96px; font-weight: 200; line-height: 1; margin: 4px 0 2px 24px !important; }
 .cond, .hl { font-size: 19px; } .hl { font-weight: 500; }
@@ -1120,46 +1508,257 @@ h2, h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04
 .uv { background: linear-gradient(90deg, #4cd964, #ffcc00 30%, #ff9500 55%, #ff3b30 75%, #af52de); }
 .arrow { display: inline-block; font-style: normal; margin-right: 6px; }
 #map { height: 280px; border-radius: 10px; background: #1b2433; }
-[class$="-night"] #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); } /* dark map at night */
-.note, footer { color: var(--dim); font-size: 12px; } .note { margin: 8px 0 0; }
+[class*="-night"] #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); } /* dark map at night */
+#play { font: 600 13px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255, 255, 255, .2); border: 0;
+  border-radius: 12px; padding: 4px 10px; margin-right: 6px; }
+.note, footer { color: var(--dim); font-size: 12px; } .note { margin: 8px 0 0; display: flex; align-items: center; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 6px 0; font-size: 15px; }
+.seg { display: flex; gap: 4px; } .seg-btn { color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 12px;
+  background: rgba(0, 0, 0, .2); font-size: 14px; } .seg-btn.on { background: rgba(255, 255, 255, .3); }
 details summary { cursor: pointer; font-size: 15px; } details p { font-size: 14px; color: var(--dim); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 td, th { padding: 4px 2px; border-top: 1px solid var(--line); text-align: left; } td small { color: var(--dim); }
 footer { text-align: center; line-height: 1.6; } .err { color: #ffd166; }
-</style></head><body class="${sky}"><main>
+.sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); padding: max(40px, env(safe-area-inset-top)) 16px 16px; z-index: 2000; }
+.sheet .card { max-width: 528px; margin: 0 auto; background: #1d2a40; max-height: 80vh; display: grid; grid-template-rows: auto auto 1fr auto; gap: 10px; }
+.sheet input { font: 17px -apple-system, system-ui, sans-serif; padding: 10px 12px; border-radius: 10px; border: 0;
+  background: rgba(255, 255, 255, .12); color: #fff; width: 100%; box-sizing: border-box; }
+.sheet ol { list-style: none; margin: 0; padding: 0; overflow-y: auto; } .sheet li a { display: block; padding: 10px 4px;
+  color: #fff; text-decoration: none; border-top: 1px solid var(--line); }
+.sheet button { font: 15px -apple-system, system-ui, sans-serif; color: #7cc4ff; background: none; border: 0; padding: 6px; }
+body.busy::after { content: attr(data-loading); position: fixed; inset: 0; display: grid; place-items: center;
+  background: rgba(0, 0, 0, .35); font-size: 17px; z-index: 3000; }
+main { touch-action: pan-y; transition: transform .25s ease, opacity .25s ease; } main.drag { transition: none; }
+body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-enter="right"] main { animation: from-left .3s ease-out; }
+@keyframes from-right { from { transform: translateX(45%); opacity: 0; } } @keyframes from-left { from { transform: translateX(-45%); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { main, body[data-enter] main { animation: none; transition: none; } }
+.incoming { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; animation: fade .2s; }
+.incoming p { margin: 0; } @keyframes fade { from { opacity: 0; } }
+.dots { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; gap: 12px; z-index: 1500;
+  padding: 12px 0 max(12px, env(safe-area-inset-bottom)); background: linear-gradient(transparent, rgba(0, 0, 0, .3)); }
+.dot { color: rgba(255, 255, 255, .45); text-decoration: none; font-size: 10px; line-height: 1; } .dot.on { color: #fff; }
+.tabs { display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto; }
+.tabs button { flex: 0 0 auto; font: 13px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, .2);
+  border: 0; border-radius: 12px; padding: 4px 11px; } .tabs button.on { background: rgba(255, 255, 255, .3); }
+#cwa-map { height: 330px; border-radius: 10px; background: #e6e9ee; }
+.nh-chart { display: flex; align-items: flex-end; gap: 3px; height: 54px; }
+.nh-chart i { flex: 1; min-height: 2px; background: #7cc4ff; border-radius: 2px 2px 0 0; }
+.nh-axis { display: flex; justify-content: space-between; margin: 4px 0 0; font-size: 12px; color: var(--dim); }
+</style></head><body class="${sky}" data-loading="${w.loading}" data-enter="${ui.enter || ""}"><main>
+<nav class="places">${chips}</nav>
 <header class="hero">
   <p class="place">${esc(r.place)}</p>
-  <p class="via">${r.placeVia ? `township from ${esc(r.placeVia)}` : ""}${r.station ? ` · station ${esc(r.station.name)} ${r.station.distance.toFixed(1)} km` : ""}</p>
+  <p class="via">${r.placeVia ? esc(w.via[r.placeVia] || r.placeVia) : ""}${r.station ? " · " + w.station(esc(r.station.name), r.station.distance.toFixed(1)) : ""}</p>
+  ${r.updating ? `<p class="via" id="updating">↻ ${esc(w.updating(twTime(r.updated)))}</p>` : ""}
   <p class="temp">${fmtT(cur)}</p>
   <p class="cond">${esc(wx)}</p>
-  <p class="hl">H:${fmtT(r.summary.hi)}  L:${fmtT(r.summary.lo)}</p>
+  <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>
 </header>
-${r.stale ? card("", `<p>Showing the last forecast. ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
+${r.stale ? card("", `<p>${w.staleBanner} ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
 ${warnings ? card("", warnings, "alert") : ""}
+${nextHour}
 ${card("", `<p class="summary">${outlook(r)}</p><ol class="hours">${hours}</ol>`)}
-${days.length ? card(`📅 ${days.length}-day forecast`, `<ol class="days">${dayRows}</ol>`) : ""}
+${days.length ? card(`📅 ${w.days(days.length)}`, `<ol class="days">${dayRows}</ol>`) : ""}
 ${radar}
 ${tiles.length ? `<div class="tiles">${tiles.join("")}</div>` : ""}
-${card("", `<details><summary>How this forecast is made</summary>
-<p>Each hour blends CWA's township forecast with ${models} weather models. The nearest CWA station pulls the next
-hours toward what it measures now, and every run checks earlier forecasts against the station, so sources that keep
-missing here lose weight. Temperature error (°C) per source, then samples and bias:</p>
-<table><tr><th>Source</th><th>0–6 h</th><th>6–24 h</th><th>24–48 h</th></tr>${skillRows}</table></details>`)}
-<footer>Updated ${new Date(r.updated).toTimeString().slice(0, 5)} · Data: CWA 中央氣象署, Open-Meteo${radar ? ", map © OpenStreetMap contributors" : ""}
+${card(`⚙️ ${w.settings}`, `<p class="row"><span>${w.language}</span><span class="seg">` +
+  `<a class="seg-btn${LANG === "en" ? " on" : ""}" href="${act("lang?to=en")}">English</a>` +
+  `<a class="seg-btn${LANG === "zh" ? " on" : ""}" href="${act("lang?to=zh")}">中文</a></span></p>` +
+  `<h2 style="margin-top:12px">${w.notifications}</h2>${toggle("rain", w.notifyRain)}${toggle("warnings", w.notifyWarnings)}` +
+  `<p class="row"><span></span><a class="seg-btn" href="${act("test")}">${w.testButton}</a></p>`)}
+${card("", `<details><summary>${w.howTitle}</summary><p>${w.howText(models)}</p>
+<table><tr><th>${w.source}</th><th>${w.hours(0, 6)}</th><th>${w.hours(6, 24)}</th><th>${w.hours(24, 48)}</th></tr>${skillRows}</table></details>`)}
+<footer>${w.footer(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}
 ${r.errors.length && !r.stale ? `<br><span class="err">${r.errors.map(esc).join("<br>")}</span>` : ""}</footer>
 </main>
+${dots}
+<div class="incoming" id="incoming" hidden><p class="place" id="incoming-name"></p><p>${w.loading}</p></div>
+<div class="sheet" id="picker" hidden><div class="card"><h2>${w.addTitle}</h2>
+<input id="q" type="search" placeholder="${esc(w.search)}" autocomplete="off"><ol id="results"></ol>
+<button type="button" id="cancel">${w.cancel}</button></div></div>
+<script>
+const towns = ${JSON.stringify(townNames)};
+const picker = document.getElementById("picker"), q = document.getElementById("q"), results = document.getElementById("results");
+document.addEventListener("click", (e) => {
+  if (e.target.closest('a[href^="tw-weather:"]')) document.body.classList.add("busy");
+});
+function search() {
+  const text = q.value.trim().replace(/台/g, "臺");
+  results.innerHTML = "";
+  for (const name of towns.filter((t) => text && t.includes(text)).slice(0, 40)) {
+    const li = document.createElement("li"), a = document.createElement("a");
+    a.href = "tw-weather://add?place=" + encodeURIComponent(name);
+    a.textContent = name;
+    li.appendChild(a);
+    results.appendChild(li);
+  }
+}
+q.addEventListener("input", search);
+document.getElementById("add").addEventListener("click", () => { picker.hidden = false; q.value = ""; search(); q.focus(); });
+document.getElementById("cancel").addEventListener("click", () => { picker.hidden = true; });
+
+// Swipe left or right between places; the page follows the finger, as in the Weather app. If the next place
+// takes a moment, its name shows with "Loading…".
+const order = ${JSON.stringify(order)}, at = ${at};
+const names = ${JSON.stringify(order.map((p) => (p === "here" ? w.here : places[p].county + places[p].name)))};
+let touching = false;
+(() => {
+  const main = document.querySelector("main"), incoming = document.getElementById("incoming");
+  let x0 = null, y0 = 0, dx = 0, sideways = null;
+  const own = (t) => t.closest(".hours, #map, #cwa-map, .places, .tabs, .sheet, input, table");
+  document.addEventListener("touchstart", (e) => {
+    touching = true;
+    x0 = order.length > 1 && !own(e.target) ? e.touches[0].clientX : null;
+    y0 = e.touches[0].clientY; dx = 0; sideways = null;
+  }, { passive: true });
+  document.addEventListener("touchcancel", () => {
+    touching = false; x0 = null;
+    main.classList.remove("drag"); main.style.transform = "";
+  });
+  document.addEventListener("touchmove", (e) => {
+    if (x0 == null) return;
+    dx = e.touches[0].clientX - x0;
+    const dy = e.touches[0].clientY - y0;
+    if (sideways == null && Math.abs(dx) + Math.abs(dy) > 10) sideways = Math.abs(dx) > Math.abs(dy);
+    if (!sideways) return;
+    e.preventDefault();
+    const edge = (dx > 0 && at === 0) || (dx < 0 && at === order.length - 1); // nothing there: resist
+    main.classList.add("drag");
+    main.style.transform = "translateX(" + (edge ? dx / 3 : dx) + "px)";
+  }, { passive: false });
+  document.addEventListener("touchend", () => {
+    touching = false;
+    if (x0 == null || !sideways) { x0 = null; return; }
+    main.classList.remove("drag");
+    const next = at + (dx < 0 ? 1 : -1);
+    if (Math.abs(dx) > 70 && next >= 0 && next < order.length) {
+      main.style.transform = "translateX(" + (dx < 0 ? -100 : 100) + "%)";
+      main.style.opacity = "0";
+      location.href = "tw-weather://show?place=" + order[next] + "&dir=" + (dx < 0 ? "left" : "right");
+      setTimeout(() => {
+        document.getElementById("incoming-name").textContent = names[next];
+        incoming.hidden = false;
+        document.querySelectorAll(".dot").forEach((d, i) => d.classList.toggle("on", i === next));
+      }, 300);
+    } else {
+      main.style.transform = "";
+    }
+    x0 = null;
+  });
+})();
+// For the script: how far the page is scrolled, and whether redrawing it now would get in the way.
+window.pageState = () => ({ y: Math.round(window.scrollY), busy: touching || !picker.hidden ||
+  !!document.querySelector("#cwa-view:not([hidden])") || document.body.classList.contains("playing") });
+${ui.scrollY ? `window.scrollTo(0, ${Math.round(ui.scrollY)});` : ""}
+</script>
 ${radar ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script>
-const here = [${r.loc.latitude}, ${r.loc.longitude}];
+const here = [${r.loc.latitude}, ${r.loc.longitude}], frames = ${JSON.stringify(frames)}, cwa = ${JSON.stringify(cwaRadar)};
+const note = ${JSON.stringify(frames.map((f) => w.radarNote("RainViewer", f.time)))};
+const rainRadars = ${JSON.stringify(rainRadars)}, cwaNotes = ${JSON.stringify(rainRadars.map((s) => w.cwaRadarNote(s.name, s.time)))};
+const TAIWAN = [[20.6, 117.6], [27.0, 123.4]]; // Taiwan with Kinmen, Matsu and Lanyu: the map can't wander off
+// The map starts once the page has loaded, so its tiles don't hold up the page, or the next swipe.
+addEventListener("load", () => {
 if (window.L) {
-  const map = L.map("map", { zoomControl: false }).setView(here, 8);
+  const map = L.map("map", { zoomControl: false, minZoom: 7, maxBounds: TAIWAN, maxBoundsViscosity: 1 }).setView(here, 8);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", // free for light personal use, with credit
-    { maxZoom: 12, attribution: "© OpenStreetMap contributors" }).addTo(map);
-  L.imageOverlay(${JSON.stringify(r.radar.url)} + "?t=" + Date.now(), ${JSON.stringify(r.radar.bounds)}, { opacity: 0.8 }).addTo(map);
+    { minZoom: 7, maxZoom: 12, attribution: "© OpenStreetMap contributors" }).addTo(map);
+  if (frames.length) {
+    // Radar in its own pane, so the night filter on the base map leaves its colours alone. Every frame
+    // loads at once (hidden), so the animation doesn't wait for tiles.
+    map.createPane("radar").style.zIndex = 450;
+    const layers = frames.map((f) => L.tileLayer(f.url, { pane: "radar", opacity: 0, maxNativeZoom: 7, maxZoom: 12,
+      attribution: "radar © RainViewer" }).addTo(map));
+    const label = document.getElementById("radar-time"), button = document.getElementById("play");
+    let shown = layers.length - 1, timer = null;
+    const show = (i) => { layers[shown].setOpacity(0); shown = i; layers[i].setOpacity(0.85); label.textContent = note[i]; };
+    show(shown);
+    button.addEventListener("click", () => {
+      document.body.classList.toggle("playing", !timer);
+      if (timer) { clearInterval(timer); timer = null; show(layers.length - 1); button.textContent = ${JSON.stringify("▶︎ " + w.play)}; return; }
+      timer = setInterval(() => show((shown + 1) % layers.length), 700);
+      button.textContent = ${JSON.stringify("❚❚ " + w.pause)};
+    });
+  } else if (cwa) {
+    L.imageOverlay(cwa.url + "?t=" + Date.now(), cwa.bounds, { opacity: 0.8 }).addTo(map);
+  }
   L.circleMarker(here, { radius: 6, color: "#fff", weight: 2, fillColor: "#0a84ff", fillOpacity: 1 }).addTo(map);
+
+  // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it.
+  let cwaMap = null;
+  const showStation = (i) => {
+    document.querySelectorAll("#stations [data-i]").forEach((b) => b.classList.toggle("on", Number(b.dataset.i) === i));
+    document.getElementById("cwa-note").textContent = cwaNotes[i];
+    if (cwaMap) cwaMap.remove();
+    const s = rainRadars[i], box = [[-3600, 0], [0, 3600]]; // image pixels, y pointing down
+    cwaMap = L.map("cwa-map", { crs: L.CRS.Simple, zoomControl: false, attributionControl: false, zoomSnap: 0.25,
+      maxBounds: box, maxBoundsViscosity: 1, minZoom: -6, maxZoom: 1 }); // negative zoom: the image is 3600 px
+    L.imageOverlay(s.url + "?t=" + Date.now(), box).addTo(cwaMap);
+    cwaMap.fitBounds(box);
+    cwaMap.setMinZoom(cwaMap.getZoom());
+    const [x, y] = s.px;
+    if (x >= 0 && y >= 0 && x <= 3600 && y <= 3600) {
+      L.circleMarker([-y, x], { radius: 6, color: "#fff", weight: 2, fillColor: "#0a84ff", fillOpacity: 1 }).addTo(cwaMap);
+      cwaMap.setView([-y, x], cwaMap.getZoom() + 1);
+    }
+  };
+  document.querySelectorAll("[data-tab]").forEach((tab) => tab.addEventListener("click", () => {
+    const cwaTab = tab.dataset.tab === "cwa";
+    document.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("on", t === tab));
+    document.getElementById("map").hidden = cwaTab;
+    document.getElementById("radar-note").hidden = cwaTab;
+    document.getElementById("cwa-view").hidden = !cwaTab;
+    if (cwaTab && !cwaMap) showStation(0);
+  }));
+  document.querySelectorAll("#stations [data-i]").forEach((b) => b.addEventListener("click", () => showStation(Number(b.dataset.i))));
 } else {
-  document.getElementById("map").textContent = "The map needs an internet connection.";
+  document.getElementById("map").textContent = ${JSON.stringify(w.mapOffline)};
 }
+});
+</script>` : ""}
+${nextHour ? `<script>
+${radarDBZ.toString()}
+${nowcastFrom.toString()}
+addEventListener("load", async () => {
+  const rv = ${JSON.stringify({ host: r.frames.host, frames: r.frames.frames.slice(-3) })}, words = ${JSON.stringify(nhWords)};
+  const colors = ${JSON.stringify(RAINVIEWER_COLORS)};
+  const box = document.getElementById("nh-text"), zoom = 7, size = 192, n = 256 * 2 ** zoom, lat = here[0] * Math.PI / 180;
+  const cx = ((here[1] + 180) / 360) * n, cy = ((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n;
+  // a size × size dBZ grid centred on you, from one frame's tiles
+  const grid = async (path) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d"), x0 = Math.round(cx - size / 2), y0 = Math.round(cy - size / 2), jobs = [];
+    for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x0 + size - 1) / 256); tx++) {
+      for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y0 + size - 1) / 256); ty++) {
+        jobs.push(new Promise((ok, fail) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => { ctx.drawImage(img, tx * 256 - x0, ty * 256 - y0); ok(); };
+          img.onerror = fail;
+          img.src = rv.host + path + "/256/" + zoom + "/" + tx + "/" + ty + "/2/0_0.png"; // exact colours: no smoothing
+        }));
+      }
+    }
+    await Promise.all(jobs);
+    return radarDBZ(ctx.getImageData(0, 0, size, size).data, colors);
+  };
+  try {
+    const grids = await Promise.all(rv.frames.map((f) => grid(f.path)));
+    const seen = grids.reduce((sum, g) => sum + g.seen, 0), odd = grids.reduce((sum, g) => sum + g.odd, 0);
+    if (odd > 0.05 * seen) throw new Error("RainViewer's colours have changed");
+    const nc = nowcastFrom(grids.map((g) => g.dbz), size, Math.max(0, (Date.now() - rv.frames[2].time) / 60000));
+    const s = nc.steps, wet = s.map((x) => x.mmh > 0), most = Math.max(...s.map((x) => x.mmh));
+    const kind = words.kinds[most < 2.5 ? 0 : most < 10 ? 1 : 2], firstWet = wet.indexOf(true), firstDry = wet.indexOf(false);
+    const say = (t, min) => t.replace("{kind}", kind).replace("{min}", min);
+    box.textContent = wet[0] ? (firstDry < 0 ? say(words.all) : say(words.stop, s[firstDry].min))
+      : firstWet < 0 ? words.none : say(words.start, s[firstWet].min);
+    document.getElementById("nh-chart").innerHTML = s.map((x) =>
+      '<i style="height:' + (x.mmh ? Math.min(100, 12 + Math.log2(1 + x.mmh) * 22) : 0) + '%"></i>').join("");
+  } catch (e) {
+    box.textContent = words.unavailable;
+  }
+});
 </script>` : ""}
 </body></html>`;
 }
@@ -1167,13 +1766,24 @@ if (window.L) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+// A township typed in a widget's Parameter field, or from a link: "臺南市東區", or a township name found only
+// once in Taiwan (with or without its 鄉/鎮/市/區).
+function findPlace(text) {
+  const q = String(text || "").replace(/\s+/g, "").replace(/台/g, "臺");
+  if (!q) return null;
+  const exact = TOWN_POINTS.find((t) => t.county + t.name === q);
+  if (exact) return exact;
+  const named = TOWN_POINTS.filter((t) => t.name === q || t.name.slice(0, -1) === q);
+  return named.length === 1 ? named[0] : null;
+}
+
 async function askKey(message) {
   const a = new Alert();
-  a.title = "CWA API key";
+  a.title = T().keyTitle;
   a.message = message;
   a.addTextField("CWA-XXXXXXXX-...");
-  a.addAction("Save");
-  a.addCancelAction("Skip");
+  a.addAction(T().save);
+  a.addCancelAction(T().skip);
   if ((await a.present()) === -1) return null;
   const key = a.textFieldValue(0).trim();
   if (key) Keychain.set(KEYCHAIN_KEY, key);
@@ -1183,36 +1793,196 @@ async function askKey(message) {
 async function ensureKey() {
   if (Keychain.contains(KEYCHAIN_KEY)) return Keychain.get(KEYCHAIN_KEY);
   if (config.runsInWidget) return null;
-  return askKey("Paste your 授權碼 from opendata.cwa.gov.tw (會員 → 取得授權碼).");
+  return askKey(T().keyPrompt);
 }
 
 async function main() {
+  sharedDownloads.clear(); // each run of the script downloads afresh
+  const settings = await loadSettings();
+  setLang(settings.lang);
   const family = config.widgetFamily || "medium";
+  // A widget's Parameter (or a pinned widget's tap, ?place=…) picks a saved place instead of the phone's location.
+  const asked = args.widgetParameter || (args.queryParameters && args.queryParameters.place) || "";
+  const pinned = findPlace(asked);
+  if (config.runsInApp) {
+    if (asked && !pinned) throw new Error(T().unknownPlace(asked));
+    return showApp(await ensureKey(), settings, pinned);
+  }
   let result;
   try {
-    const key = await ensureKey();
-    result = await run(key);
-    // CWA answered with an error (most likely a mistyped key): offer to replace the saved key.
-    const rejected = key && result.errors.find((e) => e.startsWith("CWA stations:"));
-    if (config.runsInApp && rejected) {
-      const newKey = await askKey(rejected + "\nPaste a new key, or Skip to keep the current one.");
-      if (newKey) result = await run(newKey);
-    }
+    if (asked && !pinned) throw new Error(T().unknownPlace(asked));
+    result = await run(await ensureKey(), { place: pinned, settings });
   } catch (e) {
     const w = new ListWidget();
-    w.addText("Weather error: " + e.message);
+    w.addText(T().weatherError + e.message);
     if (config.runsInWidget) { Script.setWidget(w); return; }
     throw e;
   }
   if (config.runsInWidget || config.runsInAccessoryWidget) {
     Script.setWidget(buildWidget(result, family));
-  } else if (config.runsInApp) {
-    const wv = new WebView();
-    await wv.loadHTML(detailHTML(result));
-    await wv.present(true);
+    if (settings.notifyTest) { // armed by "Send a test" in the full view
+      await sendNotification("test", T().testTitle, T().testBodyWidget);
+      settings.notifyTest = false;
+      saveSettings(settings);
+    }
   } else {
     await buildWidget(result, family).presentMedium();
   }
+}
+
+// The forecast last saved for a place, from this hour on, to show while a new one loads (null if there's none
+// left). Radar frames, the next hour and old errors are left out; the station's reading only if under an hour old.
+async function savedForecast(place) {
+  const state = await storage(place).load(), last = state && state.lastResult;
+  const nowKey = hourKey(new Date()), rows = last && last.rows ? last.rows.filter((h) => h.key >= nowKey) : [];
+  if (rows.length < 12) return null;
+  const today = nowKey.slice(0, 10), tomorrow = addHours(today + "T00", 24).slice(0, 10);
+  return { ...last, rows, updating: true, stale: false, errors: [], frames: null, qpf: null, rainRadarTimes: {},
+    station: Date.now() - Date.parse(last.updated) < HOUR ? last.station : null,
+    warnings: stillActive(last.warnings), days: (last.days || []).filter((d) => d.day >= today),
+    sun: last.loc ? [today, tomorrow].map((day) => ({ day, ...sunTimes(day, last.loc) })) : last.sun,
+    moon: last.moon ? moonPhase(new Date()) : null };
+}
+
+// The place's name on a plain page: while its first forecast loads, or with a Try again link if it couldn't.
+function placeholderHTML(name, note, retry) {
+  return `<html lang="${LANG === "zh" ? "zh-Hant-TW" : "en"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>
+:root { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: grid; place-content: center; gap: 6px; padding: 0 24px; text-align: center;
+  color: #fff; font: 17px/1.35 -apple-system, system-ui, sans-serif; background: linear-gradient(#2f6fd0, #5aa9e6) fixed; }
+p { margin: 0; } .place { font-size: 28px; } a { color: #fff; }
+</style></head><body><p class="place">${esc(name)}</p><p>${esc(note)}</p>` +
+    (retry != null ? `<p><a href="tw-weather://show?place=${retry}">${T().tryAgain}</a></p>` : "") + `</body></html>`;
+}
+
+// The full view. It opens at once, on the forecast last saved for the place (marked "Updating…"), and redraws
+// when the new one is in; swiping to a place that isn't loaded yet works the same way after a second. Its links
+// to tw-weather://… come here, one at a time, and the page is redrawn.
+async function showApp(key, settings, pinned) {
+  const wv = new WebView();
+  let current = "here", enter = "", result = null, failure = null, shows = 0;
+  if (pinned) { // a widget pinned to a place: open on it, saving it if it isn't yet
+    current = settings.places.findIndex((p) => p.county === pinned.county && p.name === pinned.name);
+    if (current < 0) current = settings.places.push({ county: pinned.county, name: pinned.name }) - 1;
+    saveSettings(settings);
+  }
+  // Forecasts by place (and key), so swiping back and forth is instant; each is refetched after 10 minutes.
+  const placeOf = (i) => (i === "here" ? null : findPlace(settings.places[i].county + settings.places[i].name));
+  const nameOf = (p) => (p ? p.county + p.name : "here") + "|" + key;
+  const cache = new Map(), loading = new Map();
+  const forecast = (p) => {
+    const name = nameOf(p), hit = cache.get(name);
+    if (hit && Date.now() - hit.at < 10 * 60e3) return Promise.resolve(hit.result);
+    if (!loading.has(name)) {
+      loading.set(name, run(key, { place: p, settings })
+        .then((r) => { cache.set(name, { result: r, at: Date.now() }); return r; })
+        .finally(() => loading.delete(name)));
+    }
+    return loading.get(name);
+  };
+  // Fetch the places on either side, so the next swipe needn't wait.
+  const prefetchNeighbours = () => {
+    const order = ["here", ...settings.places.map((_, i) => i)], at = order.indexOf(current);
+    for (const i of [order[at + 1], order[at - 1]]) if (i !== undefined) forecast(placeOf(i)).catch(() => {});
+  };
+  const draw = async (ui = {}) => {
+    const name = current === "here" ? T().here : settings.places[current].county + settings.places[current].name;
+    const page = result ? detailHTML(result, { settings, current, enter, ...ui })
+      : failure ? placeholderHTML(name, T().loadFailed + " " + failure.message, current) : placeholderHTML(name, T().loading);
+    enter = "";
+    await wv.loadHTML(page);
+  };
+  let queue = Promise.resolve();
+  const enqueue = (task) => (queue = queue.then(task).catch(() => draw()).catch(() => {}));
+  // Redraw with what just came in, kept where it was scrolled to. Not while that would get in the way (a finger
+  // on the screen, the place search, the 降雨雷達 tab or the animation open): then try again in 2 s, for up to a minute.
+  const redraw = async (ticket, tries = 0) => {
+    if (ticket !== shows) return;
+    let page = { y: 0, busy: false };
+    try {
+      page = JSON.parse(await wv.evaluateJavaScript("JSON.stringify(window.pageState ? pageState() : { y: 0, busy: false })"));
+    } catch (e) { /* a plain page */ }
+    if (page.busy && tries < 30) {
+      Timer.schedule(CONFIG.redrawRetryMs, false, () => enqueue(() => redraw(ticket, tries + 1)));
+      return;
+    }
+    await draw({ scrollY: page.y });
+  };
+  // When the new forecast arrives, show it, unless another place has been chosen since. If it fails, the saved one
+  // stays, marked as old, or the place's page says so.
+  const whenIn = (ticket, pending) => pending.then(
+    (r) => enqueue(() => { if (ticket !== shows) return; result = r; failure = null; return redraw(ticket); }),
+    (e) => enqueue(() => {
+      if (ticket !== shows) return;
+      if (result) result = { ...result, updating: false, stale: true, errors: [e.message] };
+      else failure = e;
+      return draw();
+    }));
+  const show = async (i, dir = "") => {
+    const ticket = ++shows, p = placeOf(i), pending = forecast(p);
+    current = i; enter = dir; failure = null;
+    prefetchNeighbours();
+    const fresh = await within(pending, CONFIG.swipeWaitMs);
+    result = fresh || (await savedForecast(p));
+    await draw();
+    if (!fresh) whenIn(ticket, pending);
+  };
+  const handle = async (action, params) => {
+    if (action === "show") return show(settings.places[Number(params.place)] ? Number(params.place) : "here", params.dir || "");
+    if (action === "add") {
+      const t = findPlace(params.place);
+      if (!t) return draw();
+      let i = settings.places.findIndex((p) => p.county === t.county && p.name === t.name);
+      if (i < 0) i = settings.places.push({ county: t.county, name: t.name }) - 1;
+      saveSettings(settings);
+      return show(i);
+    }
+    if (action === "remove") {
+      const [gone] = settings.places.splice(Number(params.place), 1);
+      if (gone) cache.delete(nameOf(gone));
+      saveSettings(settings);
+      return show("here");
+    }
+    if (action === "lang") { settings.lang = params.to; setLang(params.to); }
+    if (action === "notify") for (const k of Object.keys(params)) settings.notify[k] = params[k] === "1";
+    if (action === "test") {
+      await sendNotification("test", T().testTitle, T().testBodyApp);
+      settings.notifyTest = true;
+    }
+    saveSettings(settings);
+    return draw();
+  };
+  wv.shouldAllowRequest = (request) => {
+    const url = String(request.url);
+    if (!url.startsWith("tw-weather://")) return true;
+    const [action, query = ""] = url.slice("tw-weather://".length).split("?");
+    const params = Object.fromEntries(query.split("&").filter(Boolean).map((kv) => kv.split("=").map(decodeURIComponent)));
+    enqueue(() => handle(action, params));
+    return false;
+  };
+
+  // Open at once on what there is, then fetch.
+  const ticket = ++shows, first = placeOf(current);
+  result = await savedForecast(first);
+  await draw();
+  const presented = wv.present(true);
+  prefetchNeighbours();
+  let fresh = forecast(first);
+  // CWA answered with an error (most likely a mistyped key): offer to replace the saved key.
+  const answer = await fresh.catch(() => null);
+  const rejected = key && answer && answer.errors.find((e) => e.startsWith("CWA stations:"));
+  if (rejected) {
+    const newKey = await askKey(T().keyRejected(rejected));
+    if (newKey) {
+      key = newKey;
+      fresh = forecast(first).catch(() => answer);
+      prefetchNeighbours();
+    }
+  }
+  await whenIn(ticket, fresh);
+  await queue;
+  await presented;
 }
 
 // __TEST__ is only defined by test/harness.mjs
