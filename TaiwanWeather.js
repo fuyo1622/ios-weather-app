@@ -35,7 +35,11 @@ const CONFIG = {
   hoursShown: 8,
   abroadTimeout: 10,           // s: Open-Meteo and RainViewer (servers in Germany) can stall from Taiwan; CWA gets 20
   swipeWaitMs: 1000,           // the full view waits this long for a new forecast, then shows the last one saved
+  locationWaitMs: 6000,        // GPS fix and Apple's geocoder: after this, the last known place / nearest centre
+  refreshMinutes: 10,          // widgets ask iOS for a new forecast this often; the open full view refreshes too
+  pageWaitMs: 4000,            // the full view waits at most this long for a page to finish loading
   redrawRetryMs: 2000,         // a redraw that would get in the way (finger on the screen…) is tried again this much later
+  rainChance: 20,              // %: an hour from here on counts as a chance of rain (its % shows); 50+ is "likely"
 };
 
 // CWA county → 3-day township forecast dataset ID (F-D0047-xxx)
@@ -242,18 +246,21 @@ function shared(name, minutes, download) {
   return promise;
 }
 
-// The value of promise if it arrives within ms, else null; the promise keeps going.
+// The value of promise if it arrives within ms, else null; the promise keeps going. (Without a timer, it waits.)
 function within(promise, ms) {
   return new Promise((done) => {
-    const timer = Timer.schedule(ms, false, () => done(null));
-    promise.then((v) => { timer.invalidate(); done(v); }, () => { timer.invalidate(); done(null); });
+    let timer = null;
+    try { timer = Timer.schedule(ms, false, () => done(null)); } catch (e) { /* no Timer here */ }
+    const stop = () => { if (timer) timer.invalidate(); };
+    promise.then((v) => { stop(); done(v); }, () => { stop(); done(null); });
   });
 }
 
 async function getLocation(state) {
   try {
     Location.setAccuracyToThreeKilometers();
-    const loc = await Location.current();
+    const loc = await within(Location.current(), CONFIG.locationWaitMs); // no fix in time: the last known place
+    if (!loc) throw new Error("no location");
     return { latitude: loc.latitude, longitude: loc.longitude };
   } catch (e) {
     return state.lastLocation || CONFIG.fallbackLocation;
@@ -336,7 +343,7 @@ async function findTown(loc, state) {
   if (last && distanceKm(loc, last) < 1) return last;
   let match = null;
   try {
-    const names = (await Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"))
+    const names = ((await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [])
       .flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
     match = TOWN_POINTS.find((t) => names.includes(t.county) && names.includes(t.name));
   } catch (e) { /* offline or no answer: use the nearest centre */ }
@@ -522,42 +529,42 @@ async function fetchRainRadarTimes(key) {
     metas[i].cwaopendata.dataset.DateTime]).filter(([, t]) => t));
 }
 
+// The 降雨雷達 images of the last 40 minutes, one every 2 minutes, from the list CWA's website animates (open data
+// has only the latest): { RCSL: [{ time, path }, …], … }, newest first. Their 1000 px versions (about 230 KB) are
+// what the next-hour forecast reads. The list is about 35 KB.
+async function fetchRainRadarFrames() {
+  const req = new Request(CWA_SITE + "Data/js/obs_img/Observe_radar_rain.js");
+  req.timeoutInterval = 10;
+  const text = await req.loadString().catch((e) => { throw new Error("CWA rain radar: " + e.message); }), frames = {};
+  for (const [path, code, t] of text.matchAll(/CV1_(RC[A-Z]{2})_1000\/CV1_\1_1000_(\d{14})_\w+\.png/g)) {
+    const [y, mo, d, h, mi, s] = [0, 4, 6, 8, 10, 12].map((i, k) => Number(t.slice(i, k ? i + 2 : 4)));
+    const time = Date.UTC(y, mo - 1, d, h - 8, mi, s); // Taiwan time
+    if (Date.now() - time < 40 * 60e3) (frames[code] = frames[code] || []).push({ time, path });
+  }
+  if (!Object.keys(frames).length) throw new Error("CWA rain radar: no recent images");
+  for (const list of Object.values(frames)) list.sort((a, b) => b.time - a.time);
+  return frames;
+}
+
+// Up to three frames about ten minutes apart (within 4 minutes of that, and at least 5 apart), oldest first,
+// ending with the newest: what the next-hour forecast follows the rain through. Fewer if the radar skipped some.
+function pickFrames(list) {
+  if (!list || !list.length) return [];
+  const newest = list[0], picked = [newest];
+  for (const back of [10, 20]) {
+    const want = newest.time - back * 60e3;
+    const f = list.reduce((best, x) => (Math.abs(x.time - want) < Math.abs(best.time - want) ? x : best));
+    if (Math.abs(f.time - want) <= 4 * 60e3 && f.time <= picked[0].time - 5 * 60e3) picked.unshift(f);
+  }
+  return picked;
+}
+
 // Radar frames from the past two hours, ten minutes apart (RainViewer, which covers Taiwan), for the map's animation.
 async function fetchRainViewer() {
   const data = await getJSON("https://api.rainviewer.com/public/weather-maps.json", CONFIG.abroadTimeout);
   const past = data.radar && data.radar.past;
   if (!past || !past.length) throw new Error("RainViewer: no radar frames");
   return { host: data.host, frames: past.map((f) => ({ time: f.time * 1000, path: f.path })) };
-}
-
-// CWA's official radar rain forecast for the next hour (QPESUMS: one total per 0.0125° cell, about 1.4 km,
-// updated every 10 minutes), as the most in any cell next to loc, so a ±1-cell offset doesn't matter.
-// The file is 2.7 MB, so only the full view fetches it, only when rain looks possible soon, and once for all places.
-async function fetchQPF(loc) {
-  const text = await shared("qpf", 10, () => {
-    const req = new Request("https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Forecast/F-B0046-001.json");
-    req.timeoutInterval = 30;
-    return req.loadString();
-  });
-  const head = text.slice(0, 5000), field = (k) => (head.match(new RegExp(`"${k}"\\s*:\\s*"([^"]+)"`)) || [])[1];
-  const res = Number(field("GridResolution")), nx = Number(field("GridDimensionX")), ny = Number(field("GridDimensionY"));
-  const first = head.match(/東經([\d.]+)、北緯([\d.]+)/); // the first cell, per the file's own description
-  const lon0 = first ? Number(first[1]) : Number(field("StartPointLongitude"));
-  const lat0 = first ? Number(first[2]) : Number(field("StartPointLatitude"));
-  if (!res || !nx || !ny) throw new Error("CWA rain forecast: bad file");
-  const x0 = Math.round((loc.longitude - lon0) / res), y0 = Math.round((loc.latitude - lat0) / res);
-  if (x0 < 1 || y0 < 1 || x0 >= nx - 1 || y0 >= ny - 1) return null;
-  // walk the comma-separated values (east first, then north) without splitting 247,000 of them
-  let pos = text.indexOf('"', text.indexOf(":", text.indexOf('"content"'))) + 1, index = 0, most = null;
-  for (const y of [y0 - 1, y0, y0 + 1]) {
-    for (const x of [x0 - 1, x0, x0 + 1]) {
-      for (; index < y * nx + x; index++) pos = text.indexOf(",", pos) + 1;
-      const end = text.indexOf(",", pos), mm = parseFloat(text.slice(pos, end < 0 ? undefined : end));
-      // -99 marks cells with no radar echo to carry forward: over Taiwan, that means no rain
-      if (Number.isFinite(mm)) most = Math.max(most ?? 0, mm < 0 ? 0 : mm);
-    }
-  }
-  return { mm: most, time: field("DateTime") };
 }
 
 // RainViewer now serves only its "Universal Blue" colours, whatever scheme is asked for (seen 2026-10-13). These
@@ -592,16 +599,65 @@ function radarDBZ(px, colors) {
   return { dbz, seen, odd };
 }
 
-// Rain for the next hour at the centre of three radar grids (size × size dBZ values, 10 minutes apart, oldest
-// first; the newest is ageMin minutes old): find how the rain moved between frames, then follow it forward
-// (Lagrangian persistence). Returns rain rates (mm/h) for 0, 5, … 60 minutes from now, and the motion found.
+// CWA's 降雨雷達 colours for 0, 1, … 65 dBZ: the colour bar on its images (read 2026-10-27). Its images are
+// opaque: white sea and light grey land where it sees no echo, shaded where it can't see.
+const CWA_RADAR_COLORS = "00ffff 00ecff 00daff 00c8ff 00b6ff 00a3ff 0091ff 007fff 006dff 005bff 0048ff 0036ff " +
+  "0024ff 0012ff 0000ff 00ff00 00f400 00e900 00de00 00d300 00c800 00be00 00b400 00aa00 00a000 009600 33ab00 66c000 " +
+  "99d500 ccea00 ffff00 fff400 ffe900 ffde00 ffd300 ffc800 ffb800 ffa800 ff9800 ff8800 ff7800 ff6000 ff4800 ff3000 " +
+  "ff1800 ff0000 f40000 e90000 de0000 d30000 c80000 be0000 b40000 aa0000 a00000 960000 ab0033 c00066 d50099 ea00cc " +
+  "ff00ff ea00ff d500ff c000ff ab00ff 9600ff";
+
+// A size × size grid of dBZ from a square piece of a 降雨雷達 image (RGBA bytes from a canvas, size × block pixels
+// a side): each cell the strongest echo among its block × block pixels. `blind` marks cells the radar can't see
+// (its shaded sectors behind mountains, beyond its 150 km, or off the image). `odd` counts strongly coloured pixels
+// in none of its colours (mostly echoes under a county border); if they outnumber the rest, CWA has changed the
+// colours and the forecast says so instead of guessing.
 // Runs in the full view's page (passed in with toString()), so it must not use anything outside itself.
-function nowcastFrom(frames, size, ageMin) {
+function rainRadarGrid(px, colors, size, block) {
+  const table = colors.split(" ").map((hex) => [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)));
+  const exact = new Map(table.map(([r, g, b], i) => [(r << 16) | (g << 8) | b, i]));
+  const SHADED = new Set([0xe7ecf1, 0xd2d7dc]); // sea, land
+  const side = size * block, dbz = new Uint8Array(size * size), blind = new Uint8Array(size * size);
+  let seen = 0, odd = 0;
+  for (let cy = 0; cy < size; cy++) {
+    for (let cx = 0; cx < size; cx++) {
+      let most = 0, hidden = 0;
+      for (let y = cy * block; y < (cy + 1) * block; y++) {
+        for (let x = cx * block; x < (cx + 1) * block; x++) {
+          const i = (y * side + x) * 4, r = px[i], g = px[i + 1], b = px[i + 2], rgb = (r << 16) | (g << 8) | b;
+          if (px[i + 3] < 255 || SHADED.has(rgb)) { hidden++; continue; }
+          let v = exact.get(rgb);
+          if (v == null) {
+            if (Math.max(r, g, b) - Math.min(r, g, b) <= 100) continue; // map, text: no echo
+            let best = 900; // shifted a little on the way (colour management): the nearest colour, if close
+            table.forEach(([tr, tg, tb], k) => {
+              const d = (r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2;
+              if (d < best) { best = d; v = k; }
+            });
+            if (v == null) { odd++; continue; }
+          }
+          seen++;
+          if (v > most) most = v;
+        }
+      }
+      dbz[cy * size + cx] = most;
+      blind[cy * size + cx] = hidden * 2 >= block * block ? 1 : 0;
+    }
+  }
+  return { dbz, blind, seen, odd };
+}
+
+// Rain for the next hour at the centre of two or three radar grids (size × size dBZ values, oldest first, gaps[i]
+// minutes between frame i and i + 1; the newest is ageMin minutes old): find how the rain moved between frames,
+// then follow it forward (Lagrangian persistence). Returns rain rates (mm/h) for 0, 5, … 60 minutes from now, and
+// the motion found (cells per minute). Cells are 1.1–1.2 km. Echoes from RAIN dBZ on count as rain: for the
+// 降雨雷達 15 (0.3 mm/h, drizzle), where its colours turn green; for RainViewer 20 (0.6 mm/h), as before.
+// Runs in the full view's page (passed in with toString()), so it must not use anything outside itself.
+function nowcastFrom(frames, size, ageMin, gaps = [10, 10], RAIN = 20) {
   const at = (g, x, y) => (x < 0 || y < 0 || x >= size || y >= size ? 0 : g[Math.round(y) * size + Math.round(x)]);
-  const RAIN = 20; // dBZ, about 0.6 mm/h
-  // the shift carrying grid a onto grid b with the smallest mean difference where either has rain
-  const shift = (a, b) => {
-    const reach = 14; // px per 10 minutes: up to ~90 km/h at zoom 7
+  // the shift carrying grid a onto grid b with the smallest mean difference where either has rain, per minute
+  const shift = (a, b, minutes) => {
+    const reach = Math.ceil(1.4 * minutes); // cells: up to ~100 km/h
     let best = null;
     for (let dy = -reach; dy <= reach; dy++) {
       for (let dx = -reach; dx <= reach; dx++) {
@@ -616,21 +672,36 @@ function nowcastFrom(frames, size, ageMin) {
         if (n > 20 && (!best || err / n < best.err)) best = { dx, dy, err: err / n };
       }
     }
-    return best;
+    return best && { dx: best.dx / minutes, dy: best.dy / minutes };
   };
-  const moves = [shift(frames[0], frames[1]), shift(frames[1], frames[2])].filter(Boolean);
+  const moves = frames.slice(1).map((g, i) => shift(frames[i], g, gaps[i])).filter(Boolean);
   const v = moves.length ? { dx: moves.reduce((s, m) => s + m.dx, 0) / moves.length, dy: moves.reduce((s, m) => s + m.dy, 0) / moves.length }
     : { dx: 0, dy: 0 };
   const c = size / 2, last = frames[frames.length - 1];
   const steps = [];
   for (let min = 0; min <= 60; min += 5) {
-    const back = (min + ageMin) / 10; // rain arriving here then is now `back` steps upstream
+    const back = min + ageMin; // minutes: rain arriving here then is now this far upstream
     const near = [];
     for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) near.push(at(last, c - v.dx * back + ox, c - v.dy * back + oy));
     const dbz = near.sort((a, b) => b - a)[1]; // the second highest of the 3 × 3: one stray pixel isn't rain
     steps.push({ min, dbz, mmh: dbz >= RAIN ? Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6) : 0 }); // Marshall–Palmer
   }
   return { steps, motion: v, moving: moves.length > 0 };
+}
+
+// What the hourly card says once the radar has been read, so it never contradicts the next-hour card: the radar's
+// sentence for the coming hour, then the forecast for the hours after it (plan.later, from detailHTML); and for
+// each hour the radar decides (this one, and the next when half of it or more falls in the coming hour), whether
+// the radar sees rain in it. steps: nowcastFrom()'s.
+// Runs in the full view's page (passed in with toString()), so it must not use anything outside itself.
+function radarOutlook(plan, sentence, steps) {
+  const wet = steps.some((x) => x.mmh > 0);
+  const text = wet || plan.later ? [sentence, plan.later].filter(Boolean).join(plan.sep) : plan.none24;
+  const hours = Array.from({ length: plan.decided }, (_, i) => {
+    const from = i ? 60 - plan.minute : 0, to = i ? 60 : 60 - plan.minute; // minutes from now
+    return steps.some((x) => x.mmh > 0 && x.min >= from && x.min <= to);
+  });
+  return { text: text + plan.gust, hours };
 }
 
 // WMO weather code (Open-Meteo) → a CWA-style phrase, so wxSymbol() can draw it.
@@ -814,6 +885,16 @@ function blend(sources, skill, nowKey, station) {
   return rows;
 }
 
+// The first of these hours with a chance of rain (20 %+), and the first where rain is likely (50 %+: what rain
+// notifications wait for).
+function rainSummary(rows) {
+  const next = rows.find((h) => h.pop != null && h.pop >= CONFIG.rainChance), likely = rows.find((h) => h.pop != null && h.pop >= 50);
+  return { nextRain: next ? next.key : null, nextRainPop: next ? next.pop : null,
+    likelyRain: likely ? likely.key : null, likelyRainPop: likely ? likely.pop : null };
+}
+// Whether the nearest station reports rain right now: the only time a forecast hour may say "Rain now".
+const stationRain = (r) => !!(r.station && r.station.weather && r.station.weather.includes("雨"));
+
 function summarize(rows, sources, station) {
   const nowKey = rows[0].key, today = nowKey.slice(0, 10);
   const temps = rows.filter((r) => r.key.startsWith(today) && r.t != null).map((r) => r.t);
@@ -832,12 +913,10 @@ function summarize(rows, sources, station) {
   const tmr = rows.filter((r) => r.key.startsWith(tomorrowKey));
   const tmrT = tmr.filter((r) => r.t != null).map((r) => r.t);
   const tmrPop = tmr.filter((r) => r.pop != null).map((r) => r.pop);
-  const nextRain = rows.slice(0, 24).find((r) => r.pop != null && r.pop >= 50);
   return {
     hi: temps.length ? Math.max(...temps) : null,
     lo: temps.length ? Math.min(...temps) : null,
-    nextRain: nextRain ? nextRain.key : null,
-    nextRainPop: nextRain ? nextRain.pop : null,
+    ...rainSummary(rows.slice(0, 24)),
     tomorrow: {
       hi: tmrT.length ? Math.max(...tmrT) : null,
       lo: tmrT.length ? Math.min(...tmrT) : null,
@@ -869,7 +948,9 @@ async function run(apiKey, opts = {}) {
   const forApp = config.runsInApp ? Promise.allSettled([fetchExtras(loc), fetchAir(loc),
     apiKey ? shared("radar " + apiKey, 5, () => fetchRadar(apiKey)) : Promise.resolve(null),
     shared("rainviewer", 5, fetchRainViewer),
-    apiKey ? shared("rain radars " + apiKey, 2, () => fetchRainRadarTimes(apiKey)) : Promise.resolve({})]) : null;
+    apiKey ? shared("rain radars " + apiKey, 2, () => fetchRainRadarTimes(apiKey)) : Promise.resolve({}),
+    RAIN_RADARS.some((s) => distanceKm(loc, s) <= 145) ? shared("rain radar frames", 2, fetchRainRadarFrames)
+      : Promise.resolve(null)]) : null;
   // Open-Meteo's servers are in Germany and can stall from Taiwan, so CWA's requests don't wait for them.
   const modelsReq = Promise.allSettled([fetchModels(loc)]);
   const [stationsRes, townRes] = await Promise.allSettled([
@@ -940,14 +1021,10 @@ async function run(apiKey, opts = {}) {
     errors,
   };
   if (forApp) {
-    // CWA's own next-hour radar forecast, when rain looks possible within 3 hours (the file is 2.7 MB).
-    const rainLikely = rows.slice(0, 3).some((h) => h.pop >= 30) || !!(station && station.weather && station.weather.includes("雨"));
-    const qpfReq = rainLikely ? fetchQPF(loc).catch((e) => { errors.push(e.message); return null; }) : null;
-    const [extras, air, radar, frames, rainRadarTimes] = (await forApp).map((res) => settled(res));
-    const qpf = await qpfReq;
+    const [extras, air, radar, frames, rainRadarTimes, rainFrames] = (await forApp).map((res) => settled(res));
     const today = nowKey.slice(0, 10), tomorrow = addHours(today + "T00", 24).slice(0, 10);
     Object.assign(result, {
-      loc, air, radar, frames, qpf, rainRadarTimes,
+      loc, air, radar, frames, rainRadarTimes, rainFrames,
       days: dailyForecast(result, week, extras),
       details: currentDetails(station && station.t != null ? station.t : rows[0].t, station, extras, nowKey),
       rainToday: station && station.acc != null && station.acc >= 0 ? station.acc : null,
@@ -968,12 +1045,13 @@ async function run(apiKey, opts = {}) {
 async function notifyChanges(state, r, settings) {
   const sent = state.notified = state.notified || { rain: null, warnings: [] };
   const out = [], s = r.summary, now = Date.now();
-  if (settings.notify.rain && s.nextRain) {
-    const soon = keyToDate(s.nextRain) - now <= HOUR;
+  if (settings.notify.rain && s.likelyRain) { // 50 % or more
+    const soon = keyToDate(s.likelyRain) - now <= HOUR, pop = Math.round(s.likelyRainPop) + "%";
     const recent = sent.rain && now - Date.parse(sent.rain) < 3 * HOUR;
     const raining = r.station && r.station.weather && r.station.weather.includes("雨");
     if (soon && !recent && !raining) {
-      out.push({ id: "rain", title: T().rainSoonTitle(r.place), body: outlook({ ...r, gustMax: null }) });
+      const body = keyToDate(s.likelyRain) <= now ? T().rainLikelyNowLong(pop) : T().rainAtLong(false, fmtHour(s.likelyRain) + ":00", pop);
+      out.push({ id: "rain", title: T().rainSoonTitle(r.place), body });
       sent.rain = new Date(now).toISOString();
     }
   }
@@ -1011,23 +1089,27 @@ const WORDS = {
   en: {
     now: "Now", today: "Today", tomorrow: "Tomorrow", weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
     hiLo: (hi, lo) => `H${hi} L${lo}`, hiLoWide: (hi, lo) => `H:${hi}  L:${lo}`,
-    rainNowShort: (p) => `Rain now ${p}%`, rainAtShort: (tmrw, h, p) => `Rain ${tmrw ? "tmrw " : ""}~${h}:00 (${p}%)`,
+    rainNowShort: (p) => `Rain now ${p}%`, rainAtShort: (tmrw, t, p) => `Rain ${tmrw ? "tmrw " : ""}~${t} (${p}%)`,
+    rainChanceShort: (p) => `Rain chance ${p}%`, rainLikelyNowShort: (p) => `Rain likely ${p}%`,
     noRainShort: "No rain next 24h", tomorrowLine: (hi, lo, pop) => `Tomorrow  H${hi} L${lo}  ·  Rain ${pop}`,
     stale: "stale", weatherError: "Weather error: ",
     unknownPlace: (p) => `Unknown place "${p}". Use a township, e.g. 臺南市東區.`,
     via: { apple: "township from Apple Maps", nearest: "township from the nearest township centre", saved: "saved place" },
     station: (name, km) => `station ${name} ${km} km`, staleBanner: "Showing the last forecast.", until: (t) => `until ${t}`,
     noRain24: "No rain expected in the next 24 hours.", rainNowLong: (p) => `Rain now (${p}).`,
-    rainAtLong: (tmrw, h, p) => `Rain likely ${tmrw ? "tomorrow " : ""}around ${h}:00 (${p}).`,
+    rainAtLong: (tmrw, t, p) => `Rain likely ${tmrw ? "tomorrow " : ""}around ${t} (${p}).`,
+    rainChanceNowLong: (p) => `Chance of rain now (${p}).`, rainLikelyNowLong: (p) => `Rain likely this hour (${p}).`,
+    rainChanceAtLong: (tmrw, t, p) => `Chance of rain ${tmrw ? "tomorrow " : ""}around ${t} (${p}).`,
     gusts: (v) => ` Wind gusts up to ${v} m/s.`, sunrise: "Sunrise", sunset: "Sunset", days: (n) => `${n}-day forecast`,
-    radar: "Rain radar", radarNote: (src, t) => `${src} ${t} · the blue dot is you`, play: "Play", pause: "Pause",
+    radar: "Rain radar", radarNote: (src, t) => `${src}${t ? " " + t : ""} · the blue dot is you`, play: "Play", pause: "Pause",
     mapOffline: "The map needs an internet connection.", radarTabs: ["Moving radar", "CWA rain radar"],
     cwaRadarNote: (name, t) => `CWA rain radar at ${name}${t ? " " + t : ""}, every 2 minutes · the blue dot is you`,
     nextHour: "Next hour", nhNone: "No rain in the next hour.", nhStart: "{kind} rain starting in about {min} min.",
     nhStop: "{kind} rain stopping in about {min} min.", nhAll: "{kind} rain for the next hour.",
     nhKinds: ["Light", "Moderate", "Heavy"], nhUnavailable: "The radar isn't available right now.",
-    nhSource: "From the last 30 minutes of radar, carried forward.", min30: "30 min", min60: "60 min",
-    qpf: (mm) => `CWA radar forecast: ${mm} mm in the next hour.`,
+    nhFromCWA: (name, t) => `From CWA's ${name} rain radar (${t}): the last 20 minutes, carried forward.`,
+    nhFromRV: (t) => `From RainViewer's radar (${t}): the last 20 minutes, carried forward.`, min30: "30 min", min60: "60 min",
+    nhAmount: (mm) => `About ${mm} mm in the next hour.`,
     air: "Air quality", aqiLevels: ["Good", "Moderate", "Unhealthy for sensitive groups", "Unhealthy", "Very unhealthy", "Hazardous"],
     aqiNote: (pm) => `${pm != null ? `PM2.5 ${pm} µg/m³ · ` : ""}US AQI, model estimate`,
     uv: "UV index", uvLevels: ["Low", "Moderate", "High", "Very high", "Extreme"],
@@ -1053,7 +1135,8 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     here: "My Location", add: "Add", addTitle: "Add a place", search: "Search a township, e.g. 東區", remove: "Remove",
     cancel: "Cancel", settings: "Settings", language: "Language", notifications: "Notifications for My Location",
     notifyRain: "Rain within the hour", notifyWarnings: "New CWA warnings", on: "On", off: "Off", loading: "Loading…",
-    updating: (t) => `Updating… (shown: ${t})`, loadFailed: "Couldn't load the forecast.", tryAgain: "Try again",
+    updating: (t) => `Updating… (shown: ${t})`,
+    timing: (x) => `Last switch: forecast ${(x.forecast / 1000).toFixed(1)} s${x.saved ? " (showed the saved one)" : ""}, page ${(x.page / 1000).toFixed(1)} s`, loadFailed: "Couldn't load the forecast.", tryAgain: "Try again",
     rainSoonTitle: (place) => `🌧️ Rain soon · ${place}`, warnBody: (t) => `Until ${t} · CWA`,
     testButton: "Send a test", testTitle: "🔔 TaiwanWeather",
     testBodyApp: "Notifications work. A widget will send a second test at its next refresh.",
@@ -1064,23 +1147,27 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
   zh: {
     now: "現在", today: "今天", tomorrow: "明天", weekdays: ["週日", "週一", "週二", "週三", "週四", "週五", "週六"],
     hiLo: (hi, lo) => `高${hi} 低${lo}`, hiLoWide: (hi, lo) => `最高 ${hi}  最低 ${lo}`,
-    rainNowShort: (p) => `正在下雨 ${p}%`, rainAtShort: (tmrw, h, p) => `${tmrw ? "明天 " : ""}${h}:00 可能下雨 ${p}%`,
+    rainNowShort: (p) => `正在下雨 ${p}%`, rainAtShort: (tmrw, t, p) => `${tmrw ? "明天 " : ""}${t} 可能下雨 ${p}%`,
+    rainChanceShort: (p) => `降雨機率 ${p}%`, rainLikelyNowShort: (p) => `可能下雨 ${p}%`,
     noRainShort: "24 小時內無雨", tomorrowLine: (hi, lo, pop) => `明天  高${hi} 低${lo}  ·  降雨 ${pop}`,
     stale: "舊資料", weatherError: "天氣錯誤：",
     unknownPlace: (p) => `找不到「${p}」。請輸入鄉鎮市區，例如 臺南市東區。`,
     via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點" },
     station: (name, km) => `測站 ${name} ${km} 公里`, staleBanner: "顯示上一次的預報。", until: (t) => `至 ${t}`,
     noRain24: "未來 24 小時預計不會下雨。", rainNowLong: (p) => `現在正在下雨（${p}）。`,
-    rainAtLong: (tmrw, h, p) => `${tmrw ? "明天 " : ""}${h}:00 左右可能下雨（${p}）。`,
+    rainAtLong: (tmrw, t, p) => `${tmrw ? "明天 " : ""}${t} 左右可能下雨（${p}）。`,
+    rainChanceNowLong: (p) => `現在有機會下雨（${p}）。`, rainLikelyNowLong: (p) => `這一小時可能下雨（${p}）。`,
+    rainChanceAtLong: (tmrw, t, p) => `${tmrw ? "明天 " : ""}${t} 左右有機會下雨（${p}）。`,
     gusts: (v) => `陣風最大每秒 ${v} 公尺。`, sunrise: "日出", sunset: "日落", days: (n) => `${n} 天預報`,
-    radar: "雷達回波", radarNote: (src, t) => `${src} ${t} · 藍點是你的位置`, play: "播放", pause: "暫停",
+    radar: "雷達回波", radarNote: (src, t) => `${src}${t ? " " + t : ""} · 藍點是你的位置`, play: "播放", pause: "暫停",
     mapOffline: "地圖需要網路連線。", radarTabs: ["動態雷達", "降雨雷達"],
     cwaRadarNote: (name, t) => `氣象署降雨雷達（${name}）${t ? " " + t : ""}，每 2 分鐘更新 · 藍點是你的位置`,
     nextHour: "未來一小時", nhNone: "未來一小時不會下雨。", nhStart: "約 {min} 分鐘後開始下{kind}。",
     nhStop: "{kind}約 {min} 分鐘後停。", nhAll: "未來一小時都會下{kind}。",
     nhKinds: ["小雨", "中雨", "大雨"], nhUnavailable: "目前無法取得雷達資料。",
-    nhSource: "依過去 30 分鐘的雷達回波推估。", min30: "30 分", min60: "60 分",
-    qpf: (mm) => `氣象署雷達預報：未來一小時 ${mm} 毫米。`,
+    nhFromCWA: (name, t) => `依氣象署${name}降雨雷達（${t}）過去 20 分鐘的回波推估。`,
+    nhFromRV: (t) => `依 RainViewer 雷達（${t}）過去 20 分鐘的回波推估。`, min30: "30 分", min60: "60 分",
+    nhAmount: (mm) => `未來一小時約 ${mm} 毫米。`,
     air: "空氣品質", aqiLevels: ["良好", "普通", "對敏感族群不健康", "對所有族群不健康", "非常不健康", "危害"],
     aqiNote: (pm) => `${pm != null ? `PM2.5 ${pm} µg/m³ · ` : ""}美國 AQI 標準，模式估計`,
     uv: "紫外線指數", uvLevels: ["低量級", "中量級", "高量級", "過量級", "危險級"],
@@ -1106,7 +1193,8 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     here: "目前位置", add: "新增", addTitle: "新增地點", search: "搜尋鄉鎮市區，例如 東區", remove: "移除",
     cancel: "取消", settings: "設定", language: "語言", notifications: "目前位置的通知",
     notifyRain: "一小時內下雨", notifyWarnings: "新的天氣特報", on: "開", off: "關", loading: "載入中…",
-    updating: (t) => `更新中…（目前顯示 ${t} 的預報）`, loadFailed: "無法載入預報。", tryAgain: "再試一次",
+    updating: (t) => `更新中…（目前顯示 ${t} 的預報）`,
+    timing: (x) => `上次切換：預報 ${(x.forecast / 1000).toFixed(1)} 秒${x.saved ? "（先顯示已存的）" : ""}，頁面 ${(x.page / 1000).toFixed(1)} 秒`, loadFailed: "無法載入預報。", tryAgain: "再試一次",
     rainSoonTitle: (place) => `🌧️ 即將下雨 · ${place}`, warnBody: (t) => `至 ${t} · 中央氣象署`,
     testButton: "傳送測試通知", testTitle: "🔔 TaiwanWeather",
     testBodyApp: "通知正常。小工具下次更新時會再傳一則測試。", testBodyWidget: "小工具的通知也正常。",
@@ -1158,15 +1246,18 @@ function addText(stack, str, size, opts = {}) {
   return t;
 }
 
+// The rain line: the first hour with a chance of rain (20 %+), or the first where rain is likely (50 %+) when that
+// follows within 3 hours, with its chance. "Rain now" only when the station sees rain.
 function nowText(r) {
-  const s = r.summary;
-  if (s.nextRain) {
-    const pop = Math.round(s.nextRainPop);
-    if (keyToDate(s.nextRain) <= Date.now()) return T().rainNowShort(pop); // that hour has begun
-    const tmrw = s.nextRain.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
-    return T().rainAtShort(tmrw, fmtHour(s.nextRain), pop);
+  const s = r.summary, w = T();
+  if (!s.nextRain) return w.noRainShort;
+  const soon = s.likelyRain && keyToDate(s.likelyRain) - keyToDate(s.nextRain) <= 3 * HOUR;
+  const key = soon ? s.likelyRain : s.nextRain, pop = Math.round(soon ? s.likelyRainPop : s.nextRainPop);
+  if (keyToDate(key) <= Date.now()) { // that hour has begun
+    return (stationRain(r) ? w.rainNowShort : pop >= 50 ? w.rainLikelyNowShort : w.rainChanceShort)(pop);
   }
-  return T().noRainShort;
+  const tmrw = key.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
+  return w.rainAtShort(tmrw, fmtHour(key) + ":00", pop);
 }
 
 // One column per hour: rows[first], rows[first + step], ... (n columns).
@@ -1197,7 +1288,7 @@ function buildWidget(r, family) {
   const wx = (r.station && r.station.weather) || r.rows[0].wx;
   const symbol = wxSymbol(wx, r.rows[0].pop, r.rows[0].night);
   const hiLo = T().hiLo(fmtT(r.summary.hi), fmtT(r.summary.lo));
-  w.refreshAfterDate = new Date(Date.now() + 30 * 60e3);
+  w.refreshAfterDate = new Date(Date.now() + CONFIG.refreshMinutes * 60e3); // iOS may wait longer
   // A tap opens the full view (a pinned widget's on its place). Set here, it works whatever the widget's
   // "When Interacting" option says; Scriptable's default, Open App, only opens the app.
   const open = "scriptable:///run/" + encodeURIComponent(Script.name());
@@ -1279,19 +1370,23 @@ const EMOJI = { "sun.max.fill": "☀️", "moon.stars.fill": "🌙", "cloud.sun.
   "cloud.fill": "☁️", "cloud.rain.fill": "🌧️", "cloud.drizzle.fill": "🌦️", "cloud.bolt.rain.fill": "⛈️",
   "cloud.fog.fill": "🌫️", "cloud.snow.fill": "🌨️" };
 // CWA's 降雨雷達 (C-band, every 2 minutes). Each image is 3600 px square, centred on its radar, at 1779 px per
-// 150 km (measured from the range rings and checked against the coastline to about 1 km).
+// 150 km (measured from the range rings and checked against the coastline to about 1 km); the website's 1000 px
+// versions are the same picture scaled down. `id` is its open-data set, `code` its name on the website.
 const RAIN_RADARS = [
-  { name: "樹林", id: "O-A0084-001", latitude: 25.00, longitude: 121.40 },
-  { name: "南屯", id: "O-A0084-002", latitude: 24.14, longitude: 120.58 },
-  { name: "林園", id: "O-A0084-003", latitude: 22.53, longitude: 120.38 },
+  { name: "樹林", id: "O-A0084-001", code: "RCSL", latitude: 25.00, longitude: 121.40 },
+  { name: "南屯", id: "O-A0084-002", code: "RCNT", latitude: 24.14, longitude: 120.58 },
+  { name: "林園", id: "O-A0084-003", code: "RCLY", latitude: 22.53, longitude: 120.38 },
 ];
-// Where loc falls on a 降雨雷達 image, in pixels from its top-left corner.
-function rainRadarPixel(radar, loc) {
-  const k = 1779 / 150, rad = Math.PI / 180;
+// Where loc falls on a 降雨雷達 image (3600 or 1000 px), in pixels from its top-left corner.
+function rainRadarPixel(radar, loc, size = 3600) {
+  const k = (1779 / 150) * (size / 3600), rad = Math.PI / 180, c = size / 2 - 0.5;
   const north = 6371 * (loc.latitude - radar.latitude) * rad;
   const east = 6371 * (loc.longitude - radar.longitude) * rad * Math.cos(((loc.latitude + radar.latitude) / 2) * rad);
-  return [1799.5 + east * k, 1799.5 - north * k];
+  return [c + east * k, c - north * k];
 }
+// The full view is loaded as a page of CWA's website (its base URL): the site doesn't let other pages read its
+// images' pixels (no CORS), and the next-hour forecast reads the 降雨雷達 images. The page sends no referrer.
+const CWA_SITE = "https://www.cwa.gov.tw/";
 
 // Upper limits of each level (names in WORDS): AQI with its colour, and UV.
 const AQI_LEVELS = [[50, "#4cd964"], [100, "#ffcc00"], [150, "#ff9500"], [200, "#ff3b30"], [300, "#af52de"], [Infinity, "#8e1b3a"]];
@@ -1315,17 +1410,26 @@ function tempColor(t) {
   const [[a, ca], [b, cb]] = [stops[i - 1], stops[i]], f = (t - a) / (b - a);
   return `rgb(${ca.map((c, j) => Math.round(c + (cb[j] - c) * f))})`;
 }
-// One sentence for the top of the hourly card, like the Weather app's.
-function outlook(r) {
-  const s = r.summary;
-  let text = T().noRain24;
-  if (s.nextRain) {
-    const pop = Math.round(s.nextRainPop) + "%";
-    const tmrw = s.nextRain.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
-    text = keyToDate(s.nextRain) <= Date.now() ? T().rainNowLong(pop) : T().rainAtLong(tmrw, fmtHour(s.nextRain), pop);
-  }
-  if (r.gustMax >= 10.8) text += T().gusts(Math.round(r.gustMax)); // Beaufort 6 and up
+// The rain part of the hourly card's first sentence, from a rainSummary(): the first chance of rain, and when
+// that's under 50 %, the first hour rain is likely too. raining: the station sees rain ("Rain now"); when(key):
+// the time to name for an hour.
+function rainSentence(s, raining, when = (k) => fmtHour(k) + ":00") {
+  const w = T();
+  if (!s.nextRain) return w.noRain24;
+  const pop = (p) => Math.round(p) + "%", tmrw = (k) => k.slice(0, 10) !== hourKey(new Date()).slice(0, 10);
+  const likely = s.nextRainPop >= 50;
+  let text = keyToDate(s.nextRain) <= Date.now()
+    ? (raining ? w.rainNowLong : likely ? w.rainLikelyNowLong : w.rainChanceNowLong)(pop(s.nextRainPop))
+    : (likely ? w.rainAtLong : w.rainChanceAtLong)(tmrw(s.nextRain), when(s.nextRain), pop(s.nextRainPop));
+  if (!likely && s.likelyRain) text += (LANG === "zh" ? "" : " ") + w.rainAtLong(tmrw(s.likelyRain), when(s.likelyRain), pop(s.likelyRainPop));
   return text;
+}
+const gustText = (r) => (r.gustMax >= 10.8 ? T().gusts(Math.round(r.gustMax)) : ""); // Beaufort 6 and up
+
+// One sentence for the top of the hourly card, like the Weather app's. Once the full view has read the radar,
+// its page puts the radar's own sentence for the coming hour first (see detailHTML).
+function outlook(r) {
+  return rainSentence(r.summary, stationRain(r)) + gustText(r);
 }
 
 // The full view: what opens when you tap a widget or run the script in Scriptable. Links to tw-weather://…
@@ -1364,7 +1468,7 @@ function detailHTML(r, ui = {}) {
     const sun = events.filter(([on, m]) => on === day && Math.floor(m / 60) === hour && !(on === today && m < minuteNow))
       .map(([, m, e, label]) => `<li class="sun"><span>${hm(m)}</span><b>${e}</b><small></small><span>${label}</span></li>`);
     return [`<li><span>${i ? fmtHour(h.key) : w.now}</span><b>${EMOJI[i ? wxSymbol(h.wx, h.pop, h.night) : symbol]}</b>` +
-      `<small>${h.pop != null && h.pop >= 20 ? Math.round(h.pop) + "%" : ""}</small><span>${fmtT(i ? h.t : cur)}</span></li>`, ...sun];
+      `<small>${h.pop != null && h.pop >= CONFIG.rainChance ? Math.round(h.pop) + "%" : ""}</small><span>${fmtT(i ? h.t : cur)}</span></li>`, ...sun];
   }).join("");
 
   // Ten days, each bar placed on the range of the whole ten days.
@@ -1374,7 +1478,7 @@ function detailHTML(r, ui = {}) {
   const dayRows = days.map((x, i) => {
     const name = i ? w.weekdays[new Date(Date.parse(x.day + "T12:00:00+08:00")).getUTCDay()] : w.today;
     const dot = i === 0 && cur != null ? `<em style="left:${pct(cur)}%"></em>` : "";
-    return `<li><span>${name}</span><b>${EMOJI[wxSymbol(x.wx, x.pop, false)]}<small>${x.pop >= 20 ? Math.round(x.pop) + "%" : ""}</small></b>` +
+    return `<li><span>${name}</span><b>${EMOJI[wxSymbol(x.wx, x.pop, false)]}<small>${x.pop >= CONFIG.rainChance ? Math.round(x.pop) + "%" : ""}</small></b>` +
       `<span class="lo">${fmtT(x.lo)}</span><span class="bar"><i style="left:${pct(x.lo)}%;right:${(100 - pct(x.hi)).toFixed(1)}%;` +
       `background:linear-gradient(90deg,${tempColor(x.lo)},${tempColor(x.hi)})"></i>${dot}</span><span>${fmtT(x.hi)}</span></li>`;
   }).join("");
@@ -1430,8 +1534,8 @@ function detailHTML(r, ui = {}) {
 
   // Radar: RainViewer's last two hours as an animation, else CWA's latest image.
   const frames = r.frames && r.frames.frames.length ? r.frames.frames.map((f) => ({
-    url: `${r.frames.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, time: hm(((f.time / 60000) + 8 * 60) % 1440) })) : [];
-  const cwaRadar = r.radar && r.radar.url ? { url: r.radar.url, bounds: r.radar.bounds, time: String(r.radar.time).slice(11, 16) } : null;
+    url: `${r.frames.host}${f.path}/256/{z}/{x}/{y}/2/0_0.png`, time: hm(((f.time / 60000) + 8 * 60) % 1440) })) : [];
+  const cwaRadar = r.radar && r.radar.url ? { url: r.radar.url, bounds: r.radar.bounds, time: r.radar.time ? String(r.radar.time).slice(11, 16) : "" } : null;
   const mapSource = frames.length ? 2 : cwaRadar ? 1 : 0;
   // CWA's 降雨雷達 as a second tab, nearest radar first; its image (about 1 MB) loads only when opened.
   const rainRadars = r.loc ? RAIN_RADARS.map((s) => ({ name: s.name, km: distanceKm(r.loc, s), px: rainRadarPixel(s, r.loc),
@@ -1445,11 +1549,30 @@ function detailHTML(r, ui = {}) {
     `<div id="cwa-map"></div><p class="note" id="cwa-note">${esc(w.cwaRadarNote(rainRadars[0].name, rainRadars[0].time))}</p></div>` +
     `<p class="note" id="radar-note">` + (frames.length ? `<button id="play" type="button">▶︎ ${w.play}</button> ` : "") +
     `<span id="radar-time">${esc(w.radarNote(frames.length ? "RainViewer" : w.radar, frames.length ? frames[frames.length - 1].time : cwaRadar.time))}</span></p>`) : "";
-  // The next hour, worked out in the page from RainViewer's last three frames, their colours read back as dBZ.
-  const nextHour = frames.length >= 3 && r.loc ? card(`☔ ${w.nextHour}`, `<p class="summary" id="nh-text">${w.loading}</p>` +
+  // The next hour, worked out in the page from radar images, their colours read back as dBZ: the last 20 minutes
+  // of the nearest CWA 降雨雷達 that sees where you are (every 2 minutes, from 145 km), else RainViewer's.
+  const twHM = (ms) => hm((ms / 60000 + 8 * 60) % 1440);
+  const nhRadars = r.loc ? RAIN_RADARS.map((s) => ({ s, km: distanceKm(r.loc, s) })).filter((x) => x.km <= 145)
+    .sort((a, b) => a.km - b.km).map(({ s }) => ({ s, frames: pickFrames((r.rainFrames || {})[s.code]) }))
+    .filter((x) => x.frames.length >= 2).map(({ s, frames: list }) => ({ name: s.name, px: rainRadarPixel(s, r.loc, 1000),
+      frames: list.map((f) => ({ url: CWA_SITE + "Data/radar_rain/" + f.path, time: f.time })),
+      note: w.nhFromCWA(s.name, twHM(list[list.length - 1].time)) })) : [];
+  const nhRV = frames.length >= 3 ? { host: r.frames.host, frames: r.frames.frames.slice(-3), note: w.nhFromRV(frames[frames.length - 1].time) } : null;
+  const nextHour = r.loc && (nhRadars.length || nhRV) ? card(`☔ ${w.nextHour}`, `<p class="summary" id="nh-text">${w.loading}</p>` +
     `<div class="nh-chart" id="nh-chart"></div><p class="nh-axis"><span>${w.now}</span><span>${w.min30}</span><span>${w.min60}</span></p>` +
-    `<p class="note">${w.nhSource}${r.qpf && r.qpf.mm != null ? " " + w.qpf(r.qpf.mm.toFixed(1)) : ""}</p>`) : "";
-  const nhWords = { none: w.nhNone, start: w.nhStart, stop: w.nhStop, all: w.nhAll, kinds: w.nhKinds, unavailable: w.nhUnavailable };
+    `<p class="nh-note" id="nh-source"></p>`) : "";
+  const nhWords = { none: w.nhNone, start: w.nhStart, stop: w.nhStop, all: w.nhAll, kinds: w.nhKinds, unavailable: w.nhUnavailable,
+    amount: w.nhAmount("{mm}") };
+  // Once the radar is read, the hourly card follows it for the coming hour (radarOutlook): the hours it decides are
+  // this one, and the next when half of it or more falls in the coming hour; after them, the forecast. An hour
+  // starting before the coming hour is over is named by when that is ("23:30"), not by its start.
+  const minute = minuteNow % 60, decided = minute >= 30 ? 2 : 1, end = Date.now() + HOUR;
+  const nhPlan = { minute, decided, sep: LANG === "zh" ? "" : " ", none24: w.noRain24, gust: gustText(r), keepNow: stationRain(r),
+    later: (() => {
+      const later = rainSummary(r.rows.slice(decided, 24));
+      const when = (k) => (keyToDate(k) < end ? hm(Math.floor((minuteNow + 60) / 5) * 5 % 1440) : fmtHour(k) + ":00");
+      return later.nextRain ? rainSentence(later, false, when) : "";
+    })() };
 
   const srcNames = { cwa: "CWA 鄉鎮預報" };
   const skillRows = Object.entries(r.skill).map(([src, buckets]) =>
@@ -1463,7 +1586,7 @@ function detailHTML(r, ui = {}) {
   const townNames = TOWN_POINTS.map((t) => t.county + t.name);
 
   return `<html lang="${LANG === "zh" ? "zh-Hant-TW" : "en"}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="no-referrer">
 ${radar ? `<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">` : ""}
 <style>
 :root { color-scheme: dark; --glass: rgba(10, 20, 40, .28); --line: rgba(255, 255, 255, .16); --dim: rgba(255, 255, 255, .64); }
@@ -1511,7 +1634,8 @@ h2, h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04
 [class*="-night"] #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); } /* dark map at night */
 #play { font: 600 13px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255, 255, 255, .2); border: 0;
   border-radius: 12px; padding: 4px 10px; margin-right: 6px; }
-.note, footer { color: var(--dim); font-size: 12px; } .note { margin: 8px 0 0; display: flex; align-items: center; }
+.note, .nh-note, footer { color: var(--dim); font-size: 12px; } .note { margin: 8px 0 0; display: flex; align-items: center; }
+.nh-note { margin: 8px 0 0; }
 .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 6px 0; font-size: 15px; }
 .seg { display: flex; gap: 4px; } .seg-btn { color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 12px;
   background: rgba(0, 0, 0, .2); font-size: 14px; } .seg-btn.on { background: rgba(255, 255, 255, .3); }
@@ -1557,7 +1681,7 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
 ${r.stale ? card("", `<p>${w.staleBanner} ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
 ${warnings ? card("", warnings, "alert") : ""}
 ${nextHour}
-${card("", `<p class="summary">${outlook(r)}</p><ol class="hours">${hours}</ol>`)}
+${card("", `<p class="summary" id="outlook">${outlook(r)}</p><ol class="hours">${hours}</ol>`)}
 ${days.length ? card(`📅 ${w.days(days.length)}`, `<ol class="days">${dayRows}</ol>`) : ""}
 ${radar}
 ${tiles.length ? `<div class="tiles">${tiles.join("")}</div>` : ""}
@@ -1568,7 +1692,7 @@ ${card(`⚙️ ${w.settings}`, `<p class="row"><span>${w.language}</span><span c
   `<p class="row"><span></span><a class="seg-btn" href="${act("test")}">${w.testButton}</a></p>`)}
 ${card("", `<details><summary>${w.howTitle}</summary><p>${w.howText(models)}</p>
 <table><tr><th>${w.source}</th><th>${w.hours(0, 6)}</th><th>${w.hours(6, 24)}</th><th>${w.hours(24, 48)}</th></tr>${skillRows}</table></details>`)}
-<footer>${w.footer(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}
+<footer>${w.footer(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}${ui.timing ? "<br>" + w.timing(ui.timing) : ""}
 ${r.errors.length && !r.stale ? `<br><span class="err">${r.errors.map(esc).join("<br>")}</span>` : ""}</footer>
 </main>
 ${dots}
@@ -1665,9 +1789,28 @@ if (window.L) {
     { minZoom: 7, maxZoom: 12, attribution: "© OpenStreetMap contributors" }).addTo(map);
   if (frames.length) {
     // Radar in its own pane, so the night filter on the base map leaves its colours alone. Every frame
-    // loads at once (hidden), so the animation doesn't wait for tiles.
+    // loads at once (hidden), so the animation doesn't wait for tiles. Each tile goes through a canvas that drops
+    // RainViewer's see-through tan (under 15 dBZ: drizzle, or clutter on a dry day), as the next-hour card does.
     map.createPane("radar").style.zIndex = 450;
-    const layers = frames.map((f) => L.tileLayer(f.url, { pane: "radar", opacity: 0, maxNativeZoom: 7, maxZoom: 12,
+    const Radar = L.GridLayer.extend({ createTile(c, done) {
+      const tile = document.createElement("canvas"), img = new Image();
+      tile.width = tile.height = 256;
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const ctx = tile.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        try {
+          const d = ctx.getImageData(0, 0, 256, 256);
+          for (let i = 3; i < d.data.length; i += 4) if (d.data[i] < 255) d.data[i] = 0;
+          ctx.putImageData(d, 0, 0);
+        } catch (e) { /* no CORS: keep the tile as it is */ }
+        done(null, tile);
+      };
+      img.onerror = () => done(null, tile);
+      img.src = this.options.url.replace("{z}", c.z).replace("{x}", c.x).replace("{y}", c.y);
+      return tile;
+    } });
+    const layers = frames.map((f) => new Radar({ url: f.url, pane: "radar", opacity: 0, maxNativeZoom: 7, maxZoom: 12,
       attribution: "radar © RainViewer" }).addTo(map));
     const label = document.getElementById("radar-time"), button = document.getElementById("play");
     let shown = layers.length - 1, timer = null;
@@ -1718,43 +1861,93 @@ if (window.L) {
 </script>` : ""}
 ${nextHour ? `<script>
 ${radarDBZ.toString()}
+${rainRadarGrid.toString()}
 ${nowcastFrom.toString()}
+${radarOutlook.toString()}
 addEventListener("load", async () => {
-  const rv = ${JSON.stringify({ host: r.frames.host, frames: r.frames.frames.slice(-3) })}, words = ${JSON.stringify(nhWords)};
-  const colors = ${JSON.stringify(RAINVIEWER_COLORS)};
-  const box = document.getElementById("nh-text"), zoom = 7, size = 192, n = 256 * 2 ** zoom, lat = here[0] * Math.PI / 180;
-  const cx = ((here[1] + 180) / 360) * n, cy = ((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n;
-  // a size × size dBZ grid centred on you, from one frame's tiles
-  const grid = async (path) => {
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = size;
-    const ctx = canvas.getContext("2d"), x0 = Math.round(cx - size / 2), y0 = Math.round(cy - size / 2), jobs = [];
-    for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x0 + size - 1) / 256); tx++) {
-      for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y0 + size - 1) / 256); ty++) {
-        jobs.push(new Promise((ok, fail) => {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = () => { ctx.drawImage(img, tx * 256 - x0, ty * 256 - y0); ok(); };
-          img.onerror = fail;
-          img.src = rv.host + path + "/256/" + zoom + "/" + tx + "/" + ty + "/2/0_0.png"; // exact colours: no smoothing
-        }));
-      }
-    }
-    await Promise.all(jobs);
-    return radarDBZ(ctx.getImageData(0, 0, size, size).data, colors);
+  const words = ${JSON.stringify(nhWords)}, cwaRadars = ${JSON.stringify(nhRadars)}, rv = ${JSON.stringify(nhRV)};
+  const plan = ${JSON.stringify(nhPlan)};
+  const here = [${r.loc.latitude}, ${r.loc.longitude}], box = document.getElementById("nh-text");
+  const picture = (url, cors) => new Promise((ok, fail) => {
+    const img = new Image();
+    if (cors) img.crossOrigin = "anonymous";
+    img.onload = () => ok(img);
+    img.onerror = () => fail(new Error("no image"));
+    img.src = url;
+  });
+  // CWA's 降雨雷達: 160 × 160 cells of 4 × 4 pixels of its 1000 px image (1.2 km a side), centred on you. The
+  // nearest radar that sees where you are (not behind mountains or too far) and still sends images.
+  const SIZE = 160, BLOCK = 4, cwaColors = ${JSON.stringify(CWA_RADAR_COLORS)};
+  const cwaGrid = async (s, f) => {
+    const img = await picture(f.url, false), canvas = document.createElement("canvas"), side = SIZE * BLOCK;
+    const at = (v) => Math.round((SIZE / 2 + 0.5) * BLOCK - 0.5 - v); // your pixel lands in the centre cell
+    canvas.width = canvas.height = side;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, at(s.px[0]), at(s.px[1]));
+    return rainRadarGrid(ctx.getImageData(0, 0, side, side).data, cwaColors, SIZE, BLOCK);
   };
-  try {
+  const fromCWA = async () => {
+    for (const s of cwaRadars) {
+      const newest = s.frames[s.frames.length - 1];
+      if (Date.now() - newest.time > 25 * 60e3) continue; // this radar has stopped sending
+      try {
+        const last = await cwaGrid(s, newest), c = SIZE / 2;
+        let hidden = 0;
+        for (let y = c - 2; y <= c + 2; y++) for (let x = c - 2; x <= c + 2; x++) hidden += last.blind[y * SIZE + x];
+        if (hidden > 7) continue; // it can't see the 6 km around you: the next radar
+        const grids = [...(await Promise.all(s.frames.slice(0, -1).map((f) => cwaGrid(s, f)))), last];
+        const seen = grids.reduce((sum, g) => sum + g.seen, 0), odd = grids.reduce((sum, g) => sum + g.odd, 0);
+        if (odd > 200 && odd > seen) throw new Error("CWA's radar colours have changed");
+        const gaps = s.frames.slice(1).map((f, i) => (f.time - s.frames[i].time) / 60000);
+        return { nc: nowcastFrom(grids.map((g) => g.dbz), SIZE, Math.max(0, (Date.now() - newest.time) / 60000), gaps, 15), note: s.note };
+      } catch (e) { /* the next radar, then RainViewer */ }
+    }
+    return null;
+  };
+  // RainViewer: a 192 × 192 grid of its zoom-7 tiles' pixels (about 1.1 km), centred on you
+  const fromRainViewer = async () => {
+    const colors = ${JSON.stringify(RAINVIEWER_COLORS)};
+    const zoom = 7, size = 192, n = 256 * 2 ** zoom, lat = here[0] * Math.PI / 180;
+    const cx = ((here[1] + 180) / 360) * n, cy = ((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n;
+    const grid = async (path) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d"), x0 = Math.round(cx - size / 2), y0 = Math.round(cy - size / 2), jobs = [];
+      for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x0 + size - 1) / 256); tx++) {
+        for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y0 + size - 1) / 256); ty++) {
+          jobs.push(picture(rv.host + path + "/256/" + zoom + "/" + tx + "/" + ty + "/2/0_0.png", true) // exact colours: no smoothing
+            .then((img) => ctx.drawImage(img, tx * 256 - x0, ty * 256 - y0)));
+        }
+      }
+      await Promise.all(jobs);
+      return radarDBZ(ctx.getImageData(0, 0, size, size).data, colors);
+    };
     const grids = await Promise.all(rv.frames.map((f) => grid(f.path)));
     const seen = grids.reduce((sum, g) => sum + g.seen, 0), odd = grids.reduce((sum, g) => sum + g.odd, 0);
     if (odd > 0.05 * seen) throw new Error("RainViewer's colours have changed");
-    const nc = nowcastFrom(grids.map((g) => g.dbz), size, Math.max(0, (Date.now() - rv.frames[2].time) / 60000));
-    const s = nc.steps, wet = s.map((x) => x.mmh > 0), most = Math.max(...s.map((x) => x.mmh));
+    return { nc: nowcastFrom(grids.map((g) => g.dbz), size, Math.max(0, (Date.now() - rv.frames[2].time) / 60000)), note: rv.note };
+  };
+  try {
+    const found = (cwaRadars.length && (await fromCWA())) || (rv && (await fromRainViewer()));
+    if (!found) throw new Error("no radar");
+    const s = found.nc.steps, wet = s.map((x) => x.mmh > 0), most = Math.max(...s.map((x) => x.mmh));
     const kind = words.kinds[most < 2.5 ? 0 : most < 10 ? 1 : 2], firstWet = wet.indexOf(true), firstDry = wet.indexOf(false);
     const say = (t, min) => t.replace("{kind}", kind).replace("{min}", min);
     box.textContent = wet[0] ? (firstDry < 0 ? say(words.all) : say(words.stop, s[firstDry].min))
       : firstWet < 0 ? words.none : say(words.start, s[firstWet].min);
     document.getElementById("nh-chart").innerHTML = s.map((x) =>
       '<i style="height:' + (x.mmh ? Math.min(100, 12 + Math.log2(1 + x.mmh) * 22) : 0) + '%"></i>').join("");
+    const mm = s.reduce((sum, x, i) => (i ? sum + ((x.mmh + s[i - 1].mmh) / 2) * (x.min - s[i - 1].min) / 60 : 0), 0);
+    document.getElementById("nh-source").textContent = found.note + (mm >= 0.1 ? " " + words.amount.replace("{mm}", mm.toFixed(1)) : "");
+    // the hourly card follows the radar for the coming hour: its first sentence, and the hours the radar decides
+    const ro = radarOutlook(plan, box.textContent, s);
+    document.getElementById("outlook").textContent = ro.text;
+    [...document.querySelectorAll(".hours li:not(.sun)")].slice(0, plan.decided).forEach((li, i) => {
+      const icon = li.querySelector("b"), chance = li.querySelector("small");
+      if (ro.hours[i]) { if (!/🌧|⛈/u.test(icon.textContent)) icon.textContent = "🌧️"; return; }
+      chance.textContent = "";
+      if (/🌧|🌦|⛈/u.test(icon.textContent) && !(i === 0 && plan.keepNow)) icon.textContent = "☁️";
+    });
   } catch (e) {
     box.textContent = words.unavailable;
   }
@@ -1837,7 +2030,8 @@ async function savedForecast(place) {
   const nowKey = hourKey(new Date()), rows = last && last.rows ? last.rows.filter((h) => h.key >= nowKey) : [];
   if (rows.length < 12) return null;
   const today = nowKey.slice(0, 10), tomorrow = addHours(today + "T00", 24).slice(0, 10);
-  return { ...last, rows, updating: true, stale: false, errors: [], frames: null, qpf: null, rainRadarTimes: {},
+  return { ...last, rows, updating: true, stale: false, errors: [], frames: null, rainRadarTimes: {}, rainFrames: null,
+    radar: last.radar && { ...last.radar, time: null }, // its image is always the latest: no old time on it
     station: Date.now() - Date.parse(last.updated) < HOUR ? last.station : null,
     warnings: stillActive(last.warnings), days: (last.days || []).filter((d) => d.day >= today),
     sun: last.loc ? [today, tomorrow].map((day) => ({ day, ...sunTimes(day, last.loc) })) : last.sun,
@@ -1861,7 +2055,7 @@ p { margin: 0; } .place { font-size: 28px; } a { color: #fff; }
 // to tw-weather://… come here, one at a time, and the page is redrawn.
 async function showApp(key, settings, pinned) {
   const wv = new WebView();
-  let current = "here", enter = "", result = null, failure = null, shows = 0;
+  let current = "here", enter = "", result = null, failure = null, shows = 0, timing = null;
   if (pinned) { // a widget pinned to a place: open on it, saving it if it isn't yet
     current = settings.places.findIndex((p) => p.county === pinned.county && p.name === pinned.name);
     if (current < 0) current = settings.places.push({ county: pinned.county, name: pinned.name }) - 1;
@@ -1888,10 +2082,11 @@ async function showApp(key, settings, pinned) {
   };
   const draw = async (ui = {}) => {
     const name = current === "here" ? T().here : settings.places[current].county + settings.places[current].name;
-    const page = result ? detailHTML(result, { settings, current, enter, ...ui })
+    const page = result ? detailHTML(result, { settings, current, enter, timing, ...ui })
       : failure ? placeholderHTML(name, T().loadFailed + " " + failure.message, current) : placeholderHTML(name, T().loading);
     enter = "";
-    await wv.loadHTML(page);
+    // a page whose map or fonts are slow to load mustn't hold up the next swipe
+    await within(wv.loadHTML(page, CWA_SITE), CONFIG.pageWaitMs);
   };
   let queue = Promise.resolve();
   const enqueue = (task) => (queue = queue.then(task).catch(() => draw()).catch(() => {}));
@@ -1901,7 +2096,7 @@ async function showApp(key, settings, pinned) {
     if (ticket !== shows) return;
     let page = { y: 0, busy: false };
     try {
-      page = JSON.parse(await wv.evaluateJavaScript("JSON.stringify(window.pageState ? pageState() : { y: 0, busy: false })"));
+      page = JSON.parse(await within(wv.evaluateJavaScript("JSON.stringify(window.pageState ? pageState() : { y: 0, busy: false })"), 1000)) || page;
     } catch (e) { /* a plain page */ }
     if (page.busy && tries < 30) {
       Timer.schedule(CONFIG.redrawRetryMs, false, () => enqueue(() => redraw(ticket, tries + 1)));
@@ -1923,9 +2118,11 @@ async function showApp(key, settings, pinned) {
     const ticket = ++shows, p = placeOf(i), pending = forecast(p);
     current = i; enter = dir; failure = null;
     prefetchNeighbours();
-    const fresh = await within(pending, CONFIG.swipeWaitMs);
+    const t0 = Date.now(), fresh = await within(pending, CONFIG.swipeWaitMs), t1 = Date.now();
     result = fresh || (await savedForecast(p));
     await draw();
+    // how long this switch took, shown small at the bottom of the next page, to tell where a slow one waited
+    timing = { forecast: t1 - t0, page: Date.now() - t1, saved: !fresh };
     if (!fresh) whenIn(ticket, pending);
   };
   const handle = async (action, params) => {
@@ -1981,8 +2178,14 @@ async function showApp(key, settings, pinned) {
     }
   }
   await whenIn(ticket, fresh);
+  // While the page is open, the place shown is refreshed every few minutes (a forecast is kept 10 minutes).
+  const refresher = Timer.schedule(CONFIG.refreshMinutes * 30e3, true, () => enqueue(async () => {
+    const t = shows, r = await within(forecast(placeOf(current)), 30e3);
+    if (r && r !== result && t === shows) { result = r; failure = null; await redraw(t); }
+  }));
   await queue;
   await presented;
+  refresher.invalidate();
 }
 
 // __TEST__ is only defined by test/harness.mjs

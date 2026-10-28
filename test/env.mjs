@@ -166,22 +166,25 @@ export function rainviewerFixture() {
   return { version: "2.0", host: "https://tilecache.rainviewer.com", radar: { nowcast: [],
     past: Array.from({ length: 13 }, (_, i) => ({ time: last - (12 - i) * 600, path: "/v2/radar/" + (last - (12 - i) * 600) })) } };
 }
-// CWA's next-hour radar rain forecast, on a coarse 0.1° grid: 3.2 mm over Taipei 101, and -99 (no echo, as in the real file) elsewhere.
-export function qpfFixture() {
-  const nx = 60, ny = 80, res = 0.1, values = [];
-  for (let y = 0; y < ny; y++) {
-    for (let x = 0; x < nx; x++) {
-      const lon = 118 + x * res, lat = 20 + y * res;
-      values.push(Math.abs(lat - 25) < 0.06 && Math.abs(lon - 121.6) < 0.06 ? "3.200E+00" : "-9.900E+01"); // -99: no echo
-    }
-  }
-  return JSON.stringify({ cwaopendata: { dataid: "F-B0046-001", dataset: {
-    datasetInfo: { datasetDescription: "未來1小時雷達定量降雨預報", parameterSet: { StartPointLongitude: "118",
-      StartPointLatitude: "20", GridResolution: String(res), DateTime: iso(clock.ms()), GridDimensionX: String(nx),
-      GridDimensionY: String(ny), Precipitation: "mm" } },
-    contents: { contentDescription: "單位為mm，左下角為第一點東經118、北緯20，先依次經向遞增，再緯向遞增。", content: values.join(",") } } } });
-}
 export const airFixture = () => ({ current: { time: hk(clock.ms()) + ":00", us_aqi: 55, pm2_5: 13, pm10: 18.6 } });
+// The list of 降雨雷達 images CWA's website animates (Observe_radar_rain.js): for each radar (Area0 樹林 RCSL,
+// Area1 南屯 RCNT, Area2 林園 RCLY), 3600 px (size0) and 1000 px (size1) images, newest first, every 2 minutes or
+// so for the last 2 hours. net.rainRadarGap: a stretch of minutes ago with no images ([from, to]).
+export function rainRadarListFixture(ms) {
+  const stamp = (t) => new RealDate(t + 8 * HOUR).toISOString().replace(/\D/g, "").slice(0, 14);
+  const text = (t) => stamp(t).replace(/^(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$/, "$1/$2/$3 $4:$5:$6");
+  const areas = ["RCSL", "RCNT", "RCLY"].map((code, a) => {
+    const times = [];
+    for (let i = 0; i < 60; i++) {
+      const t = ms - 60e3 - a * 25e3 - i * 120e3 - (i % 3) * 7e3, ago = (ms - t) / 60e3; // irregular seconds, like the real list
+      if (!net.rainRadarGap || ago < net.rainRadarGap[0] || ago > net.rainRadarGap[1]) times.push(t);
+    }
+    const size = (n, s) => `\t'size${s}':{\n` + times.map((t, i) => `\t${i}:{"img":'CV1_${code}_${n}/CV1_${code}_${n}_${stamp(t)}_` +
+      `${noise(code, n, t).toString(16).slice(3).padEnd(64, "0")}.png', 'text':'${text(t)}'},`).join("\n") + "\n\t},";
+    return `'Area${a}':{\n${size(3600, 0)}\n${size(1000, 1)}\n},`;
+  });
+  return "var RadarRainImg = {\n" + areas.join("\n") + "\n};\n";
+}
 
 // [bias, noise] of each model's temperature vs truth; only some models give rain chance.
 export const MODEL_ERRORS = {
@@ -216,12 +219,12 @@ export function openMeteoFixture(url, ms) {
 // net.cwa: "fixture" | "live" | "unauthorized" | "down";  net.om: "fixture" | "live" | "down"
 // net.cwaKey: when set, the CWA fixture only accepts that key. net.raw: last response per URL.
 // net.rainviewer: "fixture" | "live" | "down".
-// net.qpf: "fixture" | "live" | "down" (CWA's next-hour radar rain forecast, a plain file on S3).
+// net.cwaSite: "fixture" | "live" | "down" (CWA's website: the list of 降雨雷達 images).
 // net.delay: { "host part": ms } makes matching requests answer that much later, or time out after the request's
 // timeoutInterval (seconds) if that is shorter, as a stalled connection does. net.times: when each request began
 // and ended (real ms).
-export const net = { cwa: "fixture", om: "fixture", rainviewer: "fixture", qpf: "fixture", cwaKey: null, unknownTowns: [], warnings: [], log: [], raw: {},
-  delay: {}, times: [] };
+export const net = { cwa: "fixture", om: "fixture", rainviewer: "fixture", cwaSite: "fixture", rainRadarGap: null,
+  cwaKey: null, unknownTowns: [], warnings: [], log: [], raw: {}, delay: {}, times: [] };
 async function lag(req) {
   const entry = { url: req.url, start: RealDate.now(), end: null };
   net.times.push(entry);
@@ -241,9 +244,9 @@ class Request {
   async loadString() {
     net.log.push(this.url);
     await lag(this);
-    if (this.url.includes("F-B0046-001")) {
-      if (net.qpf === "down") throw new Error("The request timed out.");
-      if (net.qpf === "fixture") return qpfFixture();
+    if (this.url.includes("www.cwa.gov.tw/")) {
+      if (net.cwaSite === "down") throw new Error("The request timed out.");
+      if (net.cwaSite === "fixture") return rainRadarListFixture(clock.ms());
     }
     return (await fetch(this.url)).text();
   }
@@ -347,7 +350,11 @@ const globals = {
   FileManager: fileManager,
   Location: {
     setAccuracyToThreeKilometers() {},
-    async current() { if (!env.location) throw new Error("Location access denied"); return env.location; },
+    async current() {
+      if (env.location === "hang") return new Promise(() => {}); // no GPS fix, ever
+      if (!env.location) throw new Error("Location access denied");
+      return env.location;
+    },
     async reverseGeocode(latitude, longitude) { env.geocodeCalls++; return env.geocode(latitude, longitude); },
   },
   Keychain: {
@@ -368,8 +375,11 @@ const globals = {
   Alert,
   WebView: class {
     constructor() { env.webview = this; }
-    async loadHTML(html) { env.html = html; env.pages.push(html); env.loads++; }
-    async present() { env.presented = "webview"; }
+    async loadHTML(html, baseURL) { // env.hangLoads: the page never finishes loading (a stalled map or font)
+      env.html = html; env.pages.push(html); env.loads++; env.baseURL = baseURL;
+      if (env.hangLoads) return new Promise(() => {});
+    }
+    async present() { env.presented = "webview"; if (env.keepOpen) await new Promise((r) => { env.close = r; }); }
     async evaluateJavaScript(js) {
       env.evaluated = js;
       return JSON.stringify(env.html && env.html.includes("window.pageState") ? env.pageState : { y: 0, busy: false });
@@ -391,8 +401,8 @@ export async function loadScript() {
     " recordForecasts, recordObservation, hourlyRain, rainAcc, wxText, isNight, wxSymbol, nowText, summarize," +
     " nearestStation, nearestTown, TOWN_POINTS, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
     " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook, findPlace, setLang, WORDS," +
-    " nowcastFrom, rainRadarPixel, RAIN_RADARS, fetchQPF, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
-    " placeholderHTML };";
+    " nowcastFrom, rainRadarPixel, RAIN_RADARS, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
+    " placeholderHTML, fetchRainRadarFrames, pickFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence };";
   const factory = new AsyncFunction(...Object.keys(globals), src + exportsLine);
   return factory(...Object.values(globals));
 }

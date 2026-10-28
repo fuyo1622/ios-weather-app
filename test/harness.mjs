@@ -37,15 +37,16 @@ const test = async (name, fn) => {
 const CONFIG0 = { ...W.CONFIG };
 function reset({ at = null, cwa = "fixture", om = "fixture" } = {}) {
   Object.assign(E.clock, { now: at });
-  Object.assign(E.net, { cwa, om, rainviewer: "fixture", qpf: "fixture", cwaKey: null, unknownTowns: [], warnings: [], raw: {},
-    delay: {}, times: [] });
+  Object.assign(E.net, { cwa, om, rainviewer: "fixture", cwaSite: "fixture", rainRadarGap: null, cwaKey: null,
+    unknownTowns: [], warnings: [], raw: {}, delay: {}, times: [] });
   Object.assign(E.scriptArgs, { widgetParameter: null, queryParameters: {} });
   Object.assign(W.CONFIG, CONFIG0);
   W.sharedDownloads.clear();
   W.setLang("en");
   E.net.log.length = 0;
   Object.assign(E.env, { location: E.HOME, geocode: () => [], geocodeCalls: 0, usedICloud: false,
-    widget: null, html: null, presented: null, loads: 0, webview: null, notifications: [], pages: [], pageState: { y: 0, busy: false } });
+    widget: null, html: null, presented: null, loads: 0, webview: null, notifications: [], pages: [], pageState: { y: 0, busy: false },
+    hangLoads: false, keepOpen: false, close: null, baseURL: undefined });
   E.alerts.answers.length = 0; E.alerts.shown.length = 0;
   E.keychain.clear();
   E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
@@ -216,15 +217,22 @@ await test("next-hour nowcast: rain moving toward you arrives on time; rain movi
   };
   // a 35 dBZ band (radius 8 px) moving 4 px east per 10 minutes, its centre 24 px west of you now
   const coming = W.nowcastFrom([frame(16, 48, 8, 35), frame(20, 48, 8, 35), frame(24, 48, 8, 35)], size, 0);
-  assert.deepEqual(coming.motion, { dx: 4, dy: 0 });
+  assert.deepEqual(coming.motion, { dx: 0.4, dy: 0 }); // cells per minute
   const first = coming.steps.find((s) => s.mmh > 0); // its edge reaches you after (24 - 8 - 1) / 4 × 10 ≈ 37.5 min
   assert.ok(first && first.min >= 30 && first.min <= 40, JSON.stringify(first));
   assert.ok(coming.steps[0].mmh === 0 && Math.abs(first.mmh - 5.6) < 0.2, "35 dBZ is about 5.6 mm/h");
   // a shower over you moving 3 px north per 10 minutes: it has left after (8 + 1) / 3 × 10 = 30 min
   const going = W.nowcastFrom([frame(48, 54, 8, 30), frame(48, 51, 8, 30), frame(48, 48, 8, 30)], size, 0);
-  assert.deepEqual(going.motion, { dx: 0, dy: -3 });
+  assert.deepEqual(going.motion, { dx: 0, dy: -0.3 });
   const stop = going.steps.find((s) => s.mmh === 0);
   assert.ok(going.steps[0].mmh > 0 && stop.min >= 25 && stop.min <= 35, JSON.stringify(stop));
+  // CWA's frames come every 2 minutes, so the ones picked can be 8 and 12 minutes apart, or only two: the same band
+  // at the same speed (0.4 px a minute) arrives at the same time, and an image 4 minutes old counts too
+  const uneven = W.nowcastFrom([frame(16, 48, 8, 35), frame(19.2, 48, 8, 35), frame(24, 48, 8, 35)], size, 0, [8, 12]);
+  assert.ok(Math.abs(uneven.motion.dx - 0.4) < 0.05 && uneven.motion.dy === 0, JSON.stringify(uneven.motion));
+  const two = W.nowcastFrom([frame(20, 48, 8, 35), frame(24, 48, 8, 35)], size, 4, [10]);
+  assert.deepEqual(two.motion, { dx: 0.4, dy: 0 });
+  assert.equal(two.steps.find((s) => s.mmh > 0).min, first.min - 5, "4 minutes older: rain 4 minutes sooner (5-minute steps)");
   // nothing on the radar: no rain, and no motion guessed
   const none = W.nowcastFrom([frame(0, 0, 0, 0), frame(0, 0, 0, 0), frame(0, 0, 0, 0)], size, 0);
   assert.ok(none.steps.every((s) => s.mmh === 0) && !none.moving);
@@ -247,6 +255,73 @@ await test("radar colours: RainViewer's colours read back as dBZ; its see-throug
   // what the old reading (grey = dBZ + 32) made of RainViewer's colours: the tan clutter was 186 dBZ, a downpour,
   // and 30 dBZ rain (#005588, red 0) was dry
   assert.deepEqual([218 - 32, Math.max(0, 0x00 - 32)], [186, 0]);
+});
+
+// The page's crop of a 降雨雷達 image (RGBA, width × width): size × block pixels a side, with your pixel in the
+// centre cell, as its canvas draws it (off the image: transparent).
+const radarCrop = (rgba, width, px, size, block) => {
+  const side = size * block, out = new Uint8ClampedArray(side * side * 4);
+  const [dx, dy] = px.map((v) => Math.round((size / 2 + 0.5) * block - 0.5 - v));
+  for (let y = 0; y < side; y++) for (let x = 0; x < side; x++) {
+    const sx = x - dx, sy = y - dy;
+    if (sx < 0 || sy < 0 || sx >= width || sy >= width) continue;
+    out.set(rgba.subarray((sy * width + sx) * 4, (sy * width + sx) * 4 + 4), (y * side + x) * 4);
+  }
+  return out;
+};
+
+await test("CWA 降雨雷達 colours: its colour bar reads back as 0–65 dBZ; shaded sectors are blind; map and text aren't rain", () => {
+  const colors = W.CWA_RADAR_COLORS.split(" "), rgb = (h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  assert.equal(colors.length, 66, "0 to 65 dBZ");
+  assert.equal(new Set(colors).size, 66);
+  // one cell per pixel (block 1): every colour, then white sea, grey land, shaded sea and land, a county border,
+  // grey text, a colour CWA doesn't use, 30 dBZ yellow off by two, and a pixel off the image
+  const px = [...colors.map((h) => [...rgb(h), 255]), [255, 255, 255, 255], [229, 229, 229, 255], [231, 236, 241, 255],
+    [210, 215, 220, 255], [0, 0, 0, 255], [140, 143, 146, 255], [255, 0, 128, 255], [255, 253, 2, 255], [0, 0, 0, 0]];
+  while (px.length < 81) px.push([255, 255, 255, 255]);
+  const g = W.rainRadarGrid(new Uint8ClampedArray(px.flat()), W.CWA_RADAR_COLORS, 9, 1);
+  assert.deepEqual([...g.dbz.slice(0, 66)], colors.map((_, i) => i));
+  assert.deepEqual([...g.dbz.slice(66, 75)], [0, 0, 0, 0, 0, 0, 0, 30, 0]);
+  assert.deepEqual([...g.blind.slice(66, 75)], [0, 0, 1, 1, 0, 0, 0, 0, 1]);
+  assert.deepEqual([g.seen, g.odd], [67, 1]);
+  // blocks of 2 × 2: the strongest echo of the four; blind when half or more is shaded
+  const block = [[0, 255, 0, 255], [255, 255, 255, 255], [255, 255, 0, 255], [231, 236, 241, 255]]; // 15 dBZ, sea, 30 dBZ, shaded
+  const quad = W.rainRadarGrid(new Uint8ClampedArray([block[0], block[1], block[2], block[3]].flat()), W.CWA_RADAR_COLORS, 1, 2);
+  assert.deepEqual([quad.dbz[0], quad.blind[0]], [30, 0]);
+  const shaded = W.rainRadarGrid(new Uint8ClampedArray([block[3], block[3], block[1], block[0]].flat()), W.CWA_RADAR_COLORS, 1, 2);
+  assert.deepEqual([shaded.dbz[0], shaded.blind[0]], [15, 1]);
+});
+
+await test("降雨雷達 frames: the website's list of the last 40 minutes; three frames about 10 minutes apart are picked", async () => {
+  reset({ at: E.tw("2026-10-27T19:23") });
+  const frames = await W.fetchRainRadarFrames();
+  assert.deepEqual(Object.keys(frames).sort(), ["RCLY", "RCNT", "RCSL"]);
+  for (const list of Object.values(frames)) {
+    assert.ok(list.length >= 19 && list.length <= 21, "40 minutes at 2-minute steps: " + list.length);
+    assert.ok(list.every((f, i) => !i || f.time < list[i - 1].time), "newest first");
+    assert.ok(list.every((f) => /^CV1_RC[A-Z]{2}_1000\/CV1_RC[A-Z]{2}_1000_\d{14}_[0-9a-f]+\.png$/.test(f.path)), list[0].path);
+  }
+  // times are Taiwan time in the file names: the newest 樹林 image was taken a minute ago
+  assert.equal(frames.RCSL[0].time, E.tw("2026-10-27T19:22"));
+  assert.ok(frames.RCSL[0].path.includes("_20261027192200_"), frames.RCSL[0].path);
+  const picked = W.pickFrames(frames.RCSL), gaps = picked.slice(1).map((f, i) => (f.time - picked[i].time) / 60e3);
+  assert.equal(picked.length, 3);
+  assert.equal(picked[2], frames.RCSL[0]);
+  assert.ok(gaps.every((m) => m >= 7 && m <= 13), JSON.stringify(gaps));
+  // the radar skipped 15–25 minutes ago: only the newest and the one about 10 minutes before it
+  reset({ at: E.tw("2026-10-27T19:23") });
+  E.net.rainRadarGap = [15, 25];
+  const gappy = W.pickFrames((await W.fetchRainRadarFrames()).RCSL);
+  assert.equal(gappy.length, 2);
+  assert.deepEqual(W.pickFrames([]), []);
+  // 南屯 on 2026-10-28: nothing between 22:28:33 and 22:36:56; 22:28:33 is still near enough to 10 minutes back
+  const nantun = ["22:42:09", "22:40:25", "22:38:35", "22:36:56", "22:28:33", "22:25:38", "22:22:21", "22:20:41", "22:18:22"]
+    .map((t) => ({ time: Date.parse(`2026-10-28T${t}+08:00`), path: t }));
+  assert.deepEqual(W.pickFrames(nantun).map((f) => f.path), ["22:22:21", "22:28:33", "22:42:09"]);
+  // the list can't be had
+  reset({ at: E.tw("2026-10-27T19:23") });
+  E.net.cwaSite = "down";
+  await assert.rejects(W.fetchRainRadarFrames(), /^Error: CWA rain radar: The request timed out\.$/);
 });
 
 await test("weather symbols: day/night, rain, thunder, fog, snow; only known SF Symbol names", () => {
@@ -279,16 +354,54 @@ await test("today's high/low covers the whole day, also late in the evening", ()
   assert.deepEqual([s.hi, s.lo], [25, 25]);
 });
 
-await test("rain line: 'Rain now' only once the rainy hour has begun; 'tmrw' for tomorrow", () => {
+await test("rain line: 'Rain now' only once the rainy hour has begun and the station sees rain; 'tmrw' for tomorrow", () => {
   const r = { summary: { nextRain: "2026-10-01T21", nextRainPop: 60 } };
+  const wet = { ...r, station: { name: "信義", weather: "陰有雨", distance: 1 } };
   E.clock.now = E.tw("2026-10-01T20:40");
   assert.equal(W.nowText(r), "Rain ~21:00 (60%)");
   E.clock.now = E.tw("2026-10-01T21:10");
-  assert.equal(W.nowText(r), "Rain now 60%");
+  assert.equal(W.nowText(r), "Rain likely 60%", "a forecast alone doesn't say it's raining");
+  assert.equal(W.nowText(wet), "Rain now 60%");
+  assert.equal(W.outlook(r), "Rain likely this hour (60%).");
+  assert.equal(W.outlook(wet), "Rain now (60%).");
+  W.setLang("zh");
+  assert.deepEqual([W.nowText(r), W.nowText(wet), W.outlook(r)], ["可能下雨 60%", "正在下雨 60%", "這一小時可能下雨（60%）。"]);
+  W.setLang("en");
   E.clock.now = E.tw("2026-10-01T23:20");
   assert.equal(W.nowText({ summary: { nextRain: "2026-10-02T15", nextRainPop: 73.4 } }), "Rain tmrw ~15:00 (73%)");
   assert.equal(W.nowText({ summary: { nextRain: null } }), "No rain next 24h");
   E.clock.now = null;
+});
+
+await test("rain line: a chance under 50 % isn't 'no rain'; likely rain soon after a chance is the one named", () => {
+  const rows = (pops) => [...pops, ...Array(30 - pops.length).fill(10)].map((pop, i) => ({ key: W.addHours("2026-10-01T08", i), t: 25, pop }));
+  const say = (pops) => { const summary = W.summarize(rows(pops), {}, null); return [W.nowText({ summary }), W.outlook({ summary })]; };
+  E.clock.now = E.tw("2026-10-01T08:20");
+  // under 50 % all day: the first hour from 20 % on, with its chance (this said "No rain next 24h" before)
+  const s = W.summarize(rows([10, 10, 10, 10, 10, 10, 10, 30, 40, 30]), {}, null);
+  assert.deepEqual([s.nextRain, s.nextRainPop, s.likelyRain], ["2026-10-01T15", 30, null]);
+  assert.deepEqual(say([10, 10, 10, 10, 10, 10, 10, 30, 40, 30]), ["Rain ~15:00 (30%)", "Chance of rain around 15:00 (30%)."]);
+  // a chance in this hour: not "Rain now"
+  assert.deepEqual(say([30]), ["Rain chance 30%", "Chance of rain now (30%)."]);
+  // 30 % at 09:00, 80 % at 11:00: the line names the likely rain, the card says both
+  assert.deepEqual(say([10, 30, 40, 80]), ["Rain ~11:00 (80%)", "Chance of rain around 09:00 (30%). Rain likely around 11:00 (80%)."]);
+  // likely only 6 hours after the first chance: the line names the chance
+  assert.deepEqual(say([10, 30, 20, 10, 10, 10, 10, 70]), ["Rain ~09:00 (30%)", "Chance of rain around 09:00 (30%). Rain likely around 15:00 (70%)."]);
+  assert.deepEqual(say([10, 15, 19]), ["No rain next 24h", "No rain expected in the next 24 hours."]);
+  W.setLang("zh");
+  assert.deepEqual(say([10, 30, 20, 10, 10, 10, 10, 70]), ["09:00 可能下雨 30%", "09:00 左右有機會下雨（30%）。15:00 左右可能下雨（70%）。"]);
+  assert.deepEqual(say([30]), ["降雨機率 30%", "現在有機會下雨（30%）。"]);
+  W.setLang("en");
+  E.clock.now = null;
+});
+
+await test("rain notification: only when rain is likely (50 %+) within the hour, not for a chance", async () => {
+  reset({ at: E.tw("2026-10-01T14:20") });
+  const settings = { notify: { rain: true, warnings: true } };
+  const r = (summary) => ({ place: "臺北市信義區", station: null, warnings: [], summary });
+  assert.deepEqual(await W.notifyChanges({}, r({ nextRain: "2026-10-01T15", nextRainPop: 40, likelyRain: null }), settings), []);
+  const out = await W.notifyChanges({}, r({ nextRain: "2026-10-01T14", nextRainPop: 30, likelyRain: "2026-10-01T15", likelyRainPop: 60 }), settings);
+  assert.deepEqual(out.map((n) => [n.title, n.body]), [["🌧️ Rain soon · 臺北市信義區", "Rain likely around 15:00 (60%)."]]);
 });
 
 // ---------------- Pipeline (fixtures) ----------------
@@ -656,22 +769,110 @@ await test("notifications for My Location: rain within the hour once, each new w
   assert.equal(E.env.notifications.length, 3);
 });
 
-await test("next hour: CWA's radar forecast is read at your cell, and fetched only when rain looks possible", async () => {
-  reset({ at: E.tw("2026-10-02T13:20") }); // rain due at 15:00
+await test("hourly card vs radar: once the radar is read, the coming hour is the radar's; the forecast follows", () => {
+  const steps = (wetFrom = null, wetTo = 60) => Array.from({ length: 13 }, (_, i) => ({ min: i * 5,
+    mmh: wetFrom != null && i * 5 >= wetFrom && i * 5 <= wetTo ? 1.2 : 0 }));
+  const plan = (o) => ({ minute: 32, decided: 2, sep: " ", none24: "No rain expected in the next 24 hours.", gust: "", keepNow: false,
+    later: "Chance of rain tomorrow around 00:00 (23%).", ...o });
+  // 宜蘭市 at 22:32 on 2026-10-28: the forecast said "Chance of rain now (35%)", the radar "No rain in the next hour"
+  let o = W.radarOutlook(plan(), "No rain in the next hour.", steps());
+  assert.equal(o.text, "No rain in the next hour. Chance of rain tomorrow around 00:00 (23%).");
+  assert.deepEqual(o.hours, [false, false], "22:00 and 23:00 lose their rain chance and rain icons");
+  // dry, and nothing later either: one sentence
+  assert.equal(W.radarOutlook(plan({ later: "" }), "No rain in the next hour.", steps()).text, "No rain expected in the next 24 hours.");
+  // rain from minute 40 (23:12): this hour stays dry, the next is the rainy one; the forecast after it still follows
+  o = W.radarOutlook(plan(), "Light rain starting in about 40 min.", steps(40));
+  assert.deepEqual([o.text, o.hours], ["Light rain starting in about 40 min. Chance of rain tomorrow around 00:00 (23%).", [false, true]]);
+  // at 22:10 only this hour is the radar's; with gusts; in 中文 without spaces
+  o = W.radarOutlook(plan({ minute: 10, decided: 1, later: "", gust: " Wind gusts up to 13 m/s." }), "Light rain for the next hour.", steps(0));
+  assert.deepEqual([o.text, o.hours], ["Light rain for the next hour. Wind gusts up to 13 m/s.", [true]]);
+  o = W.radarOutlook(plan({ sep: "", later: "明天 00:00 左右有機會下雨（23%）。" }), "未來一小時不會下雨。", steps());
+  assert.equal(o.text, "未來一小時不會下雨。明天 00:00 左右有機會下雨（23%）。");
+});
+
+await test("hourly card vs radar: the page is given the forecast for after the coming hour, named so it can't overlap", async () => {
+  const plan = (html) => new Function(html.split("\n").find((l) => l.includes("const plan = ")) + " return plan;")();
+  reset({ at: E.tw("2026-10-02T13:20") }); // rain due 14:00–17:00
   E.keychain.set("CWA_API_KEY", "KEY");
   E.setConfig({ runsInApp: true });
   await W.main();
-  let r = E.readState().lastResult;
-  assert.deepEqual(r.errors, []);
-  assert.equal(r.qpf.mm, 3.2);
-  assert.ok(E.env.html.includes("CWA radar forecast: 3.2 mm in the next hour."));
-  assert.ok(E.env.html.includes('id="nh-chart"') && E.env.html.includes("function nowcastFrom("), "the page runs the nowcast");
-  reset({ at: E.tw("2026-10-01T09:20") }); // a dry morning: the 2.7 MB file is skipped
+  // 13:20: the radar decides 13:00; 14:00 (a chance) starts before the coming hour is over (14:20), so it is named 14:20
+  let p = plan(E.env.html);
+  assert.deepEqual([p.minute, p.decided, p.sep, p.keepNow], [20, 1, " ", false]);
+  assert.match(p.later, /^Chance of rain around 14:20 \(\d+%\)\. Rain likely around 15:00 \(\d+%\)\.$/);
+  assert.ok(E.env.html.includes('<p class="summary" id="outlook">') && E.env.html.includes("function radarOutlook("));
+  assert.ok(!E.net.log.some((u) => u.includes("F-B0046-001")), "CWA's separate 2.7 MB radar forecast isn't fetched any more");
+  // 13:40: the radar decides 13:00 and 14:00; the forecast picks up at 15:00, by its own hour
+  reset({ at: E.tw("2026-10-02T13:40") });
   E.keychain.set("CWA_API_KEY", "KEY");
   E.setConfig({ runsInApp: true });
   await W.main();
-  r = E.readState().lastResult;
-  assert.ok(r.qpf == null && !E.net.log.some((u) => u.includes("F-B0046-001")));
+  p = plan(E.env.html);
+  assert.deepEqual([p.minute, p.decided], [40, 2]);
+  assert.match(p.later, /^Rain likely around 15:00 \(\d+%\)\.$/);
+});
+
+await test("next-hour radar: the 降雨雷達's green (15 dBZ, drizzle) is rain; RainViewer still starts at 20", () => {
+  const size = 96, drizzle = new Uint8Array(size * size);
+  for (let y = 40; y < 56; y++) for (let x = 40; x < 56; x++) drizzle[y * size + x] = 17; // green over you
+  assert.ok(W.nowcastFrom([drizzle, drizzle, drizzle], size, 0, [10, 10], 15).steps.every((s) => s.mmh > 0.3 && s.mmh < 0.5));
+  assert.ok(W.nowcastFrom([drizzle, drizzle, drizzle], size, 0).steps.every((s) => s.mmh === 0));
+  assert.ok(src.includes("SIZE, Math.max(0, (Date.now() - newest.time) / 60000), gaps, 15)"), "the page reads the 降雨雷達 from 15 dBZ");
+});
+
+// What the page's next-hour script is given: its words, the 降雨雷達 to try (nearest first) and RainViewer's frames.
+const nhConfig = (html) => {
+  const line = html.split("\n").find((l) => l.includes("const words = ") && l.includes("cwaRadars = "));
+  return line ? new Function(line + " return { words, cwaRadars, rv };")() : null;
+};
+
+await test("next hour: from the nearest 降雨雷達 (RainViewer when none sees you); the page counts as CWA's site", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  // loaded as a page of www.cwa.gov.tw, so it may read the images' pixels; it sends no referrer to anyone
+  assert.equal(E.env.baseURL, "https://www.cwa.gov.tw/");
+  assert.ok(E.env.html.includes('<meta name="referrer" content="no-referrer">'));
+  assert.ok(E.env.html.includes("function rainRadarGrid(") && E.env.html.includes("function nowcastFrom("));
+  let nh = nhConfig(E.env.html);
+  assert.deepEqual(nh.cwaRadars.map((s) => s.name), ["樹林", "南屯"], "within 145 km of Taipei 101, nearest first");
+  const [shulin] = nh.cwaRadars, [x, y] = W.rainRadarPixel(W.RAIN_RADARS[0], E.HOME, 1000);
+  assert.deepEqual(shulin.px, [x, y]);
+  // the 1000 px image is the 3600 px one scaled down (checked on their pixels): the same spot, 16.7 km E and 3.7 km N
+  const [bx, by] = W.rainRadarPixel(W.RAIN_RADARS[0], E.HOME);
+  assert.ok(Math.abs((bx + 0.5) / 3.6 - 0.5 - x) < 1e-9 && Math.abs((by + 0.5) / 3.6 - 0.5 - y) < 1e-9, JSON.stringify([x, y, bx, by]));
+  assert.ok(Math.abs(x - 554.4) < 0.5 && Math.abs(y - 487.4) < 0.5, JSON.stringify([x, y]));
+  assert.equal(shulin.frames.length, 3);
+  assert.ok(shulin.frames.every((f) => f.url.startsWith("https://www.cwa.gov.tw/Data/radar_rain/CV1_RCSL_1000/CV1_RCSL_1000_")));
+  const gaps = shulin.frames.slice(1).map((f, i) => (f.time - shulin.frames[i].time) / 60e3);
+  assert.ok(gaps.every((m) => m >= 7 && m <= 13), JSON.stringify(gaps));
+  assert.equal(shulin.note, "From CWA's 樹林 rain radar (13:19): the last 20 minutes, carried forward.");
+  assert.equal(nh.rv.note, "From RainViewer's radar (13:20): the last 20 minutes, carried forward.");
+  fs.writeFileSync(path.join(E.stateDir, "app-nexthour.html"), E.env.html);
+  // 金門: no 降雨雷達 within reach: RainViewer only, and its forecast doesn't download the list
+  E.scriptArgs.queryParameters = { place: "金門縣金城鎮" };
+  await W.main();
+  nh = nhConfig(E.env.html);
+  assert.ok(nh.cwaRadars.length === 0 && nh.rv);
+  assert.equal(JSON.parse(fs.readFileSync(E.placeFile("金門縣金城鎮"), "utf8")).lastResult.rainFrames, null);
+  // CWA's website down: RainViewer, and the error says which list was missing
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  E.net.cwaSite = "down";
+  await W.main();
+  nh = nhConfig(E.env.html);
+  assert.ok(nh.cwaRadars.length === 0 && nh.rv);
+  assert.deepEqual(E.readState().lastResult.errors, ["CWA rain radar: The request timed out."]);
+  // in 中文
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  fs.mkdirSync(path.dirname(E.settingsFile), { recursive: true });
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ lang: "zh" }));
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.equal(nhConfig(E.env.html).cwaRadars[0].note, "依氣象署樹林降雨雷達（13:19）過去 20 分鐘的回波推估。");
 });
 
 await test("radar card: the map stays over Taiwan; CWA 降雨雷達 tab, nearest radar first, your position on its image", async () => {
@@ -753,6 +954,7 @@ await test("the full view opens at once on the last saved forecast (marked Updat
   assert.ok(E.env.pages[0].includes("↻ Updating… (shown: 13:20)"), "the saved forecast, at once");
   fs.writeFileSync(path.join(E.stateDir, "app-updating.html"), E.env.pages[0]);
   assert.ok(!E.env.pages[0].includes('id="nh-chart"'), "no next hour from old radar frames");
+  assert.ok(E.env.pages[0].includes("Rain radar · the blue dot is you"), "CWA's image is always the latest: no old time on it");
   assert.ok(!E.env.pages[1].includes("Updating…") && E.env.pages[1].includes('id="nh-chart"'));
   assert.ok(E.env.pages[1].includes("window.scrollTo(0, 640);"), "kept where it was scrolled");
   fs.writeFileSync(path.join(E.stateDir, "app-scrolled.html"), E.env.pages[1]);
@@ -799,8 +1001,45 @@ await test("the new forecast waits while you're touching the page or searching, 
   assert.ok(E.env.pages[1].includes("window.scrollTo(0, 120);") && !E.env.pages[1].includes("Updating…"));
 });
 
-await test("places in one session share the radar, warnings, station list and CWA rain-forecast downloads", async () => {
-  reset({ at: E.tw("2026-10-02T13:20") }); // rain due at 15:00, so the 2.7 MB rain forecast is wanted
+await test("a page that never finishes loading, or GPS that never answers, doesn't hold up swipes", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  savePlaces(["臺南市東區"]);
+  Object.assign(W.CONFIG, { pageWaitMs: 50, locationWaitMs: 50 });
+  E.setConfig({ runsInApp: true });
+  E.env.hangLoads = true;
+  E.env.location = "hang";
+  const t0 = Date.now();
+  await W.main();
+  assert.ok(Date.now() - t0 < 2000, "opened in " + (Date.now() - t0) + " ms");
+  assert.ok(E.env.html.includes('<p class="place">臺北市信義區</p>'), "the last known place (Taipei 101 by default)");
+  await E.tap("tw-weather://show?place=0&dir=left");
+  assert.ok(E.env.html.includes('<p class="place">臺南市東區</p>'));
+  await E.tap("tw-weather://show?place=here&dir=right");
+  assert.ok(E.env.html.includes('<p class="place">臺北市信義區</p>'));
+  assert.match(E.env.html, /Last switch: forecast \d\.\d s, page \d\.\d s/, "how long the last switch took");
+});
+
+await test("refresh: widgets ask for a new forecast after 10 minutes; the open page refreshes itself", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  await W.main();
+  assert.equal(E.env.widget.refreshAfterDate.getTime() - E.tw("2026-10-02T13:20"), 10 * 60e3);
+  W.CONFIG.refreshMinutes = 0.002; // the page's timer: every 0.06 s here (every 5 min on the phone)
+  E.setConfig({ runsInApp: true });
+  E.env.keepOpen = true; // the page stays open until env.close()
+  const opened = W.main();
+  await waitFor(() => E.env.close && E.env.pages.length >= 2);
+  E.env.pages.length = 0;
+  E.clock.now = E.tw("2026-10-02T13:40"); // the forecast is now 20 minutes old
+  await waitFor(() => E.env.pages.length >= 1);
+  assert.ok(E.env.pages[0].includes("Updated 13:40"), E.env.pages[0].match(/Updated [^<]*/)?.[0]);
+  E.env.close();
+  await opened;
+});
+
+await test("places in one session share the radar, warnings, station list and 降雨雷達 list downloads", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
   E.keychain.set("CWA_API_KEY", "KEY");
   savePlaces(["臺北市大安區", "臺北市中山區"]);
   E.setConfig({ runsInApp: true });
@@ -812,7 +1051,7 @@ await test("places in one session share the radar, warnings, station list and CW
   const count = (part, not) => E.net.log.filter((u) => u.includes(part) && !(not && u.includes(not))).length;
   assert.equal(count("F-D0047-061?"), 3, "each place still gets its own township forecast");
   assert.deepEqual([count("weather-maps.json"), count("O-A0058-006"), count("O-A0084-001"), count("W-C0033-001"),
-    count("O-A0001-001", "StationId="), count("F-B0046-001")], [1, 1, 1, 1, 1, 1]);
+    count("O-A0001-001", "StationId="), count("Observe_radar_rain.js")], [1, 1, 1, 1, 1, 1]);
 });
 
 await test("a place that can't be loaded at all says so on its page, with Try again", async () => {
@@ -847,7 +1086,9 @@ await test("radar: the last two hours animate (RainViewer); CWA's image when Rai
   E.keychain.set("CWA_API_KEY", "KEY");
   E.setConfig({ runsInApp: true });
   await W.main();
-  assert.equal((E.env.html.match(/tilecache\.rainviewer\.com\/v2\/radar\/\d+\/256\/\{z\}\/\{x\}\/\{y\}\/2\/1_1\.png/g) || []).length, 13);
+  assert.equal((E.env.html.match(/tilecache\.rainviewer\.com\/v2\/radar\/\d+\/256\/\{z\}\/\{x\}\/\{y\}\/2\/0_0\.png/g) || []).length, 13);
+  assert.ok(E.env.html.includes("L.GridLayer.extend") && E.env.html.includes("if (d.data[i] < 255) d.data[i] = 0;"),
+    "radar tiles drop the see-through tan");
   assert.ok(E.env.html.includes('id="play"') && E.env.html.includes("radar © RainViewer"));
   assert.ok(E.env.html.includes("RainViewer 13:20 · the blue dot is you"), "the newest frame is shown first");
   fs.writeFileSync(path.join(E.stateDir, "app.html"), E.env.html);
@@ -960,12 +1201,14 @@ if (process.env.OFFLINE) {
     });
     await test("live: the app view's extra data (week, warnings, details, air quality, radar)", async () => {
       reset({ cwa: "live", om: "live" });
-      E.net.rainviewer = "live";
+      Object.assign(E.net, { rainviewer: "live", cwaSite: "live" });
       E.keychain.set("CWA_API_KEY", realKey);
       E.setConfig({ runsInApp: true });
       await W.main();
       const r = E.readState().lastResult;
       assert.ok(r.frames && r.frames.frames.length >= 6, "RainViewer radar frames: " + JSON.stringify(r.frames).slice(0, 200));
+      assert.deepEqual(Object.keys(r.rainFrames).sort(), ["RCLY", "RCNT", "RCSL"]);
+      assert.equal(nhConfig(E.env.html).cwaRadars[0].name, "樹林");
       assert.deepEqual(r.errors, []);
       assert.ok(r.days.length === 10 && r.days.every((d) => d.hi >= d.lo && d.wx), JSON.stringify(r.days.slice(0, 3)));
       const week = rawResponse("F-D0047-063").records.Locations[0].Location[0];
@@ -990,17 +1233,13 @@ if (process.env.OFFLINE) {
       assert.ok(r.place === "花蓮縣花蓮市" && r.sources.includes("cwa") && r.station && r.station.distance < 5, JSON.stringify(r.station));
       console.log(`   ${r.place}: now ${r.station.t}° at ${r.station.name} (${r.station.distance.toFixed(1)} km), H/L ${Math.round(r.summary.hi)}/${Math.round(r.summary.lo)}`);
     });
-    await test("live CWA: the 降雨雷達 images and the next-hour radar forecast are where the script expects", async () => {
+    await test("live CWA: the 降雨雷達 images are where the script expects", async () => {
       for (const radar of W.RAIN_RADARS) {
         const meta = await (await fetch(`https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/${radar.id}?Authorization=${encodeURIComponent(realKey)}&format=JSON`)).json();
         const ds = meta.cwaopendata.dataset, p = ds.datasetInfo.parameterSet;
         assert.ok(ds.resource.ProductURL.endsWith(radar.id + ".png") && p.ImageDimension === "3600x3600", JSON.stringify(ds.resource));
         assert.ok(Math.abs(p.StationLatitude - radar.latitude) < 0.006 && Math.abs(p.StationLongitude - radar.longitude) < 0.006, radar.name);
       }
-      E.net.qpf = "live";
-      const qpf = await W.fetchQPF(E.HOME);
-      assert.ok(qpf && qpf.mm >= 0 && Date.parse(qpf.time) > Date.now() - 3 * 3600e3, JSON.stringify(qpf)); // -99 (no echo) reads as 0
-      console.log(`   CWA next-hour radar forecast at Taipei 101: ${qpf.mm} mm (issued ${qpf.time})`);
     });
     await test("live CWA: the built-in township list matches CWA's in all 22 counties (names, centres)", async () => {
       const diffs = [];
@@ -1017,6 +1256,36 @@ if (process.env.OFFLINE) {
       assert.deepEqual(diffs, []);
     });
   }
+  await test("live CWA website: each 降雨雷達's last 20 minutes read as the next-hour card reads them", async () => {
+    reset();
+    E.net.cwaSite = "live";
+    const frames = await W.fetchRainRadarFrames();
+    const towns = { RCSL: "臺北市信義區", RCNT: "臺中市西屯區", RCLY: "高雄市鳳山區" };
+    const grid = async (radar, f, town) => {
+      const png = decodePNG(Buffer.from(await (await fetch(W.CWA_SITE + "Data/radar_rain/" + f.path)).arrayBuffer()));
+      assert.deepEqual([png.width, png.height], [1000, 1000]);
+      return W.rainRadarGrid(radarCrop(png.rgba, 1000, W.rainRadarPixel(radar, town, 1000), 160, 4), W.CWA_RADAR_COLORS, 160, 4);
+    };
+    const hidden = (g) => { let n = 0; for (let y = 78; y <= 82; y++) for (let x = 78; x <= 82; x++) n += g.blind[y * 160 + x]; return n; };
+    for (const radar of W.RAIN_RADARS) {
+      const list = frames[radar.code], picked = W.pickFrames(list), town = W.findPlace(towns[radar.code]);
+      assert.ok(list && Date.now() - list[0].time < 15 * 60e3, `${radar.name}'s newest image: ${list && new Date(list[0].time).toISOString()}`);
+      assert.ok(picked.length >= 2, `${radar.name}: ${picked.length} frame(s)`); // a radar sometimes skips a few images
+      const grids = [];
+      for (const f of picked) grids.push(await grid(radar, f, town));
+      const seen = grids.reduce((n, g) => n + g.seen, 0), odd = grids.reduce((n, g) => n + g.odd, 0);
+      assert.ok(odd <= 200 || odd <= seen, `${radar.name}: ${odd} strongly coloured pixels not in its colours, ${seen} in them`);
+      assert.ok(hidden(grids[2]) <= 7, `${radar.name} doesn't see ${towns[radar.code]}`);
+      const gaps = picked.slice(1).map((f, i) => (f.time - picked[i].time) / 60e3);
+      const nc = W.nowcastFrom(grids.map((g) => g.dbz), 160, (Date.now() - picked[2].time) / 60e3, gaps);
+      console.log(`   ${radar.name} → ${towns[radar.code]}: ${seen} echo pixels (${odd} under borders), frames ${gaps.map((m) => m.toFixed(1)).join(" + ")} min apart,` +
+        ` motion ${nc.moving ? `${(nc.motion.dx * 1.214 * 60).toFixed(0)}, ${(-nc.motion.dy * 1.214 * 60).toFixed(0)} km/h E, N` : "none found"},` +
+        ` next hour ${nc.steps.map((s) => s.dbz).join(" ")} dBZ`);
+    }
+    // 林園 can't see 臺東市 (behind the Central Range): the card moves on to the next radar, or RainViewer
+    const taitung = W.findPlace("臺東縣臺東市");
+    assert.ok(hidden(await grid(W.RAIN_RADARS[2], frames.RCLY[0], taitung)) > 7, "林園 sees 臺東市");
+  });
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

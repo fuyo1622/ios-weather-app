@@ -34,13 +34,20 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
 Large shows 24 hours and tomorrow. Lock Screen: temperature and next rain. Active CWA warnings (特報) replace the
 bottom line. Outside Taiwan only the models are used.
 
+**Next rain** (the widgets' rain line and the hourly card's first sentence): the first hour within 24 hours with a
+20 % chance or more, with its chance (e.g. "Rain ~15:00 (30%)"); when rain becomes likely (50 %+) within 3 hours
+after that, the line names that hour instead, and the card says both. "No rain next 24h" only when every hour is
+under 20 %. A forecast alone never says it is raining: "Rain now" only when the nearest station reports rain,
+otherwise "Rain likely 60%" or "Rain chance 30%". The "Rain soon" notification waits for 50 %. In the full view,
+the hourly card follows the radar for the coming hour (see Next hour below).
+
 **Your township** comes from Apple's geocoder when its names match CWA's, else from the nearest of CWA's 368
 township forecast points; the in-app view says which. Learning data stays on the phone (not iCloud).
 **Data use:** about 5 KB per widget refresh, plus CWA's full station list (~75 KB) once a week. Opening the full view
-adds about 0.3 MB, mostly the map and the radar image.
+adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour.
 
 ### Faster learning (optional)
-iOS refreshes widgets roughly every 15–60 min. The model learns from every run, so more runs means faster calibration. In **Shortcuts → Automation**, add a few "Time of Day" automations (e.g. every 2–3 h) that *Run Script → TaiwanWeather*, set to run immediately.
+Widgets ask iOS for a new forecast every 10 minutes, but iOS decides: usually every 15–60 min, depending on its daily budget. The open full view refreshes itself every 5–10 min. The model learns from every run, so more runs means faster calibration. In **Shortcuts → Automation**, add a few "Time of Day" automations (e.g. every 2–3 h) that *Run Script → TaiwanWeather*, set to run immediately.
 
 ## The full view
 Tapping a widget (or running the script in Scriptable) opens a page laid out like the iPhone Weather app. Widgets
@@ -64,13 +71,26 @@ scrolled, when the new one is in:
   hour (at most every 3 hours, not while it's already raining) and each new CWA warning. **Send a test** sends one
   now and arms a second for the next widget refresh, to check that widgets may notify.
 - **Next hour**: when rain starts or stops within the hour (e.g. "Light rain starting in about 20 min"), with a chart.
-  Worked out in the page from RainViewer's last three radar frames: how the rain moved, carried forward. RainViewer
-  serves only its "Universal Blue" colours now; the page reads them back as dBZ with RainViewer's colour table,
-  counts weak see-through echoes (under 15 dBZ: drizzle, or clutter on dry days) and single stray pixels as dry, and
-  says the radar is unavailable rather than guess if the colours ever change. When rain looks possible, it also shows
-  CWA's own radar forecast for the hour (QPESUMS, F-B0046-001; a 2.7 MB file, so only then).
+  Worked out in the page from radar images: how the rain moved over the last 20 minutes, carried forward. The
+  source is CWA's 降雨雷達 nearest to you (within 145 km) that sees where you are: three of its images about
+  10 minutes apart (the 1000 px versions on CWA's website, which lists the last few hours; it has a new one every
+  2 minutes), read back as dBZ with the colour bar on the images (0–65 dBZ, 1.2 km cells). A radar's shaded sectors
+  (behind mountains, beyond 150 km) count as unseen, so 337 of the 368 townships use their nearest radar, 16 the
+  next one, and the rest (south Taitung, Green Island, Kinmen, Matsu) RainViewer's last three frames, as do all
+  places when CWA's site can't be read. The card says which radar it used, and how much rain it brings ("About
+  0.8 mm in the next hour"). Rain is what the 降雨雷達 colours green or warmer (15 dBZ and up, from drizzle at
+  0.3 mm/h); its blues (under 15 dBZ) and single stray cells count as dry; RainViewer's frames count from 20 dBZ.
+  If either radar's colours ever change, the card says the radar is unavailable rather than guess. The website
+  doesn't let other pages read its images' pixels, so the full view is loaded with CWA's website as its base URL
+  (it sends no referrer to anyone).
+  Once the radar is read, the hourly card agrees with it: its first sentence is the radar's for the coming hour,
+  then the forecast after it (e.g. "No rain in the next hour. Chance of rain tomorrow around 00:00 (23%)."); this
+  hour, and the next when half of it or more falls in the coming hour, lose their rain chance and rain icon when
+  the radar sees no rain there, or get a rain icon when it does. An hour that starts before the coming hour is over
+  is named by when that is ("around 14:20"). Widgets can't read the radar, so their rain line stays the forecast's.
 - **Rain radar**, two tabs: *Moving radar* plays the last two hours in 10-minute frames (RainViewer, which covers
-  Taiwan; without it, CWA's latest radar image) on a map that stays over Taiwan, Kinmen, Matsu and Lanyu.
+  Taiwan; without it, CWA's latest radar image) on a map that stays over Taiwan, Kinmen, Matsu and Lanyu. Its tiles
+  are drawn without RainViewer's see-through tan (under 15 dBZ), which on dry days is mostly clutter.
   *CWA rain radar* shows CWA's 降雨雷達 (樹林, 南屯, 林園; every 2 minutes, 150 km around each), nearest first, with
   your position on it. Its image is about 1 MB, so it loads only when you open the tab.
 
@@ -88,8 +108,8 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
   - Put `CWA_KEY=CWA-...` in `.env` (git-ignored) to also test against live CWA, including a check of every response field the script reads.
   - Writes `test/.state/widgets.html` (every widget at iPhone SE, 15/16 and Pro Max sizes, with clipped or cut-off text flagged; `test/preview.mjs`),
     and the full view as `test/.state/app.html` (fixtures) and `app-live.html` (live data).
-  - A live test decodes RainViewer's real tiles over Taiwan (`test/png.mjs`) and fails if they use colours the
-    next-hour card doesn't know.
+  - Live tests decode RainViewer's real tiles over Taiwan and each 降雨雷達's last 20 minutes (`test/png.mjs`), run
+    the next-hour forecast on them, and fail if they use colours the card doesn't know.
 - `tools/install-page.mjs`: builds the copy page (the whole script behind a "Copy script" button, with the iPhone
   steps and a QR code), published as a private claude.ai artifact so the script can be installed without iCloud Drive.
   Rebuild and republish it whenever `TaiwanWeather.js` changes: `node tools/install-page.mjs <out.html> <page URL>`.
