@@ -62,6 +62,20 @@ scrolled, when the new one is in:
 - tiles for air quality (US AQI, CAMS model via Open-Meteo), UV, sunrise/sunset, wind (with Beaufort force), rainfall,
   feels-like (Steadman's formula, as CWA's 體感溫度), humidity and dew point, visibility, pressure, and the moon;
 - "How this forecast is made": each source's temperature error at your location (samples, bias), the learning above.
+- **Tap any card or tile for its details**, as in the Weather app: the hourly card or a day in the ten-day list opens
+  that day hour by hour, with the other days and conditions a tap away (Conditions, Precipitation, Wind, Feels
+  like, Humidity, Visibility, Pressure, UV index). Each shows the day's headline, a 24-hour chart (touch it and move
+  along to read each hour), a summary ("High 28° around 12:00, low 22° around 01:00…") and what the measure means.
+  Air quality has 5 days by the hour with each pollutant; Sunrise and sunset the sun's path, first and last light
+  and the daylight; the Moon its phase, moonrise and moonset (within about 2 minutes of almanacs), the next full and
+  new moons and a 4-week calendar; Next hour a larger chart and a jump to the 降雨雷達; a warning CWA's full text
+  and the areas it covers. The radar card has a full-screen button (⤢).
+  Where the hours come from, best first: CWA wherever it forecasts them, i.e. today and tomorrow from the blend
+  above, and feels-like, humidity, dew point and wind from its township forecast for about 3 days (the next hours
+  lean toward the station's reading); then Open-Meteo (later days, rain amounts, gusts, pressure, visibility, UV).
+  Later days' hours are fitted to the high, low and rain chance in the ten-day list, and every day's UV to its peak
+  there, so a day's sheet always agrees with its row. Air quality is CAMS via Open-Meteo; warning texts CWA's
+  W-C0033-002.
 - **Places**: swipe left or right between My Location and saved townships (dots at the bottom show where you are), or
   use the chips at the top; **＋ Add** searches all 368 townships. Places on either side load ahead, so swipes are
   instant; a place not loaded within a second shows its last saved forecast (or its name) until the new one is in.

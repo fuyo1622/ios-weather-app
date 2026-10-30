@@ -140,33 +140,100 @@ function solar(d) {
       0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g),
   };
 }
+// The sun's height above the horizon in degrees at time ms (NOAA's approximation, as solar()).
+// Runs in the full view's page too (passed in with toString()), so it must not use anything outside itself.
+function sunElevation(ms, lat, lon) {
+  const d = new Date(ms), rad = Math.PI / 180;
+  const g = (2 * Math.PI / 365) * ((ms - Date.UTC(d.getUTCFullYear(), 0, 1)) / 864e5 - 0.5);
+  const eqTime = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) -
+    0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) +
+    0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const hourAngle = ((d.getUTCHours() * 60 + d.getUTCMinutes() + eqTime + 4 * lon) / 4 - 180) * rad, phi = lat * rad;
+  return Math.asin(Math.sin(phi) * Math.sin(decl) + Math.cos(phi) * Math.cos(decl) * Math.cos(hourAngle)) / rad;
+}
 // Is the sun below the horizon at the middle of hour `key`?
 function isNight(key, loc) {
-  const d = new Date(keyToDate(key).getTime() + HOUR / 2);
-  const { eqTime, decl } = solar(d);
-  const solarMinutes = d.getUTCHours() * 60 + d.getUTCMinutes() + eqTime + 4 * loc.longitude;
-  const hourAngle = (solarMinutes / 4 - 180) * RAD, lat = loc.latitude * RAD;
-  return Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle) < SUN_DOWN;
+  return sunElevation(keyToDate(key).getTime() + HOUR / 2, loc.latitude, loc.longitude) < -0.833;
 }
-// Sunrise and sunset on a Taiwan-time day "YYYY-MM-DD", as minutes after local midnight (±2 min).
-function sunTimes(day, loc) {
+// Sunrise and sunset on a Taiwan-time day "YYYY-MM-DD", as minutes after local midnight (±2 min). alt: the sun's
+// centre in degrees, -0.833 for sunrise (refraction and the sun's radius), -6 for first and last light.
+function sunTimes(day, loc, alt = -0.833) {
   const { eqTime, decl } = solar(keyToDate(day + "T12"));
   const lat = loc.latitude * RAD;
-  const cosH = (SUN_DOWN - Math.sin(lat) * Math.sin(decl)) / (Math.cos(lat) * Math.cos(decl));
+  const cosH = (Math.sin(alt * RAD) - Math.sin(lat) * Math.sin(decl)) / (Math.cos(lat) * Math.cos(decl));
   const h = Math.acos(Math.max(-1, Math.min(1, cosH))) / RAD; // degrees; 4 minutes each
   const noon = 720 - 4 * loc.longitude - eqTime + 8 * 60;      // solar noon in Taiwan time
   return { rise: noon - 4 * h, set: noon + 4 * h };
 }
 const MOON_PHASES = [["New Moon", "🌑"], ["Waxing Crescent", "🌒"], ["First Quarter", "🌓"], ["Waxing Gibbous", "🌔"],
   ["Full Moon", "🌕"], ["Waning Gibbous", "🌖"], ["Last Quarter", "🌗"], ["Waning Crescent", "🌘"]];
-// Moon phase from the mean lunar month (within about a day of the true phase).
+// The moon's ecliptic longitude and latitude (radians) and horizontal parallax (degrees) d days after
+// 2000-01-01 12:00 UTC: the Astronomical Almanac's low-precision series, about 0.3° in its position.
+function moonOrbit(d) {
+  const at = (base, rate) => (base + rate * d) * RAD, sin = Math.sin, cos = Math.cos;
+  const L = at(218.316, 13.176396), M = at(134.963, 13.064993), Ms = at(357.529, 0.98560028);
+  const D = at(297.85, 12.190749), F = at(93.272, 13.22935);
+  return {
+    lon: L + RAD * (6.289 * sin(M) + 1.274 * sin(2 * D - M) + 0.658 * sin(2 * D) + 0.214 * sin(2 * M) - 0.186 * sin(Ms) -
+      0.114 * sin(2 * F)),
+    lat: RAD * (5.128 * sin(F) + 0.281 * sin(M + F) + 0.278 * sin(M - F) + 0.173 * sin(2 * D - F)),
+    parallax: 0.9508 + 0.0518 * cos(M) + 0.0095 * cos(2 * D - M) + 0.0078 * cos(2 * D) + 0.0028 * cos(2 * M),
+  };
+}
+// The sun's ecliptic longitude (radians) d days after 2000-01-01 12:00 UTC.
+function sunLongitude(d) {
+  const g = (357.528 + 0.9856003 * d) * RAD;
+  return (280.46 + 0.9856474 * d + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * RAD;
+}
+// The moon's phase at date, from how far it is from the sun along the ecliptic (0° new, 180° full): name, lit
+// share, and the next full and new moons (within about an hour).
 function moonPhase(date) {
-  const month = 29.530588853, newMoon = Date.UTC(2000, 0, 6, 18, 14); // a known new moon
-  const age = (((date - newMoon) / (24 * HOUR)) % month + month) % month;
-  const phase = Math.round((age / month) * 8) % 8, [name, emoji] = MOON_PHASES[phase];
-  const toFull = (month / 2 - age + month) % month;
-  return { phase, name, emoji, lit: (1 - Math.cos((2 * Math.PI * age) / month)) / 2,
-    nextFull: new Date(date.getTime() + toFull * 24 * HOUR) };
+  const elongation = (ms) => {
+    const d = ms / 864e5 - 10957.5;
+    return ((((moonOrbit(d).lon - sunLongitude(d)) / RAD) % 360) + 360) % 360;
+  };
+  const next = (target) => { // the moon gains about 12.19° a day on the sun
+    let t = date.getTime() + ((((target - elongation(date.getTime())) % 360) + 360) % 360 || 360) / 12.19 * 864e5;
+    for (let i = 0; i < 4; i++) t += (((((target - elongation(t)) % 360) + 540) % 360) - 180) / 12.19 * 864e5;
+    return new Date(t);
+  };
+  const e = elongation(date.getTime()), phase = Math.round(e / 45) % 8, [name, emoji] = MOON_PHASES[phase];
+  return { phase, name, emoji, lit: (1 - Math.cos(e * RAD)) / 2, nextFull: next(180), nextNew: next(0) };
+}
+// The moon at time ms seen from loc: its height above the horizon from the earth's centre, and its horizontal
+// parallax, in degrees.
+function moonAltitude(ms, loc) {
+  const d = ms / 864e5 - 10957.5, e = 23.4393 * RAD; // days since 2000-01-01 12:00 UTC; the earth's tilt
+  const { lon, lat, parallax } = moonOrbit(d), sin = Math.sin, cos = Math.cos;
+  const ra = Math.atan2(sin(lon) * cos(e) - Math.tan(lat) * sin(e), cos(lon));
+  const dec = Math.asin(sin(lat) * cos(e) + cos(lat) * sin(e) * sin(lon));
+  const H = (280.46061837 + 360.98564736629 * d + loc.longitude) * RAD - ra, phi = loc.latitude * RAD;
+  return { height: Math.asin(sin(phi) * sin(dec) + cos(phi) * cos(dec) * cos(H)) / RAD, parallax };
+}
+// Moonrise and moonset on a Taiwan-time day "YYYY-MM-DD", as minutes after local midnight (null when it doesn't
+// rise or set that day): when the moon's top edge meets the horizon, with refraction (its centre 0.7275 × its
+// parallax − 0.5667° up, seen from the earth's centre), found two hours at a time with a parabola through three
+// heights. Within about 2 minutes of almanacs.
+function moonTimes(day, loc) {
+  const midnight = keyToDate(day + "T00").getTime();
+  const height = (hours) => { const m = moonAltitude(midnight + hours * HOUR, loc); return m.height - (0.7275 * m.parallax - 0.5667); };
+  let rise = null, set = null, h0 = height(0);
+  for (let i = 1; i <= 24 && (rise == null || set == null); i += 2) {
+    const h1 = height(i), h2 = height(i + 1), a = (h0 + h2) / 2 - h1, b = (h2 - h0) / 2;
+    const xe = -b / (2 * a), ye = (a * xe + b) * xe + h1, disc = b * b - 4 * a * h1;
+    if (disc >= 0) {
+      const dx = Math.sqrt(disc) / (Math.abs(a) * 2);
+      let x1 = xe - dx;
+      const x2 = xe + dx, roots = (Math.abs(x1) <= 1) + (Math.abs(x2) <= 1);
+      if (x1 < -1) x1 = x2;
+      if (roots === 1) { if (h0 < 0) rise = rise ?? i + x1; else set = set ?? i + x1; }
+      else if (roots === 2) { rise = rise ?? i + (ye < 0 ? x2 : x1); set = set ?? i + (ye < 0 ? x1 : x2); }
+    }
+    h0 = h2;
+  }
+  const minutes = (x) => (x == null || x >= 24 ? null : Math.round(x * 60));
+  return { rise: minutes(rise), set: minutes(set) };
 }
 // Feels-like temperature (Steadman's apparent temperature, as CWA's 體感溫度): °C, % humidity, m/s wind.
 function feelsLike(t, rh, wind) {
@@ -383,11 +450,22 @@ function cwaElementHourly(el) {
   return out;
 }
 
-async function fetchCWAForecast(key, county, town, loc) {
+// The township forecast's hourly elements the full view's detail sheets also use (about 3 days ahead).
+const CWA_DETAIL = { "體感溫度": "feels", "相對濕度": "rh", "露點溫度": "dew", "風速": "wind", "風向": "dir" };
+const CWA_DIRS = ["北", "北北東", "東北", "東北東", "東", "東南東", "東南", "南南東", "南", "南南西", "西南", "西南西", "西",
+  "西北西", "西北", "北北西"];
+// CWA's wind direction ("偏東風", "東北風") in degrees, or null (calm, or unknown).
+function windDegrees(text) {
+  const i = CWA_DIRS.indexOf(String(text || "").replace(/^偏/, "").replace(/風$/, ""));
+  return i < 0 ? null : i * 22.5;
+}
+
+// more: also the elements in CWA_DETAIL (the full view's; about 50 KB instead of 15).
+async function fetchCWAForecast(key, county, town, loc, more = false) {
   const id = COUNTY_DATASET[county];
   if (!id) throw new Error("Unknown county " + county);
-  const url = CWA_BASE + "F-D0047-" + id + "?Authorization=" + encodeURIComponent(key) +
-    "&ElementName=" + ["溫度", "3小時降雨機率", "天氣現象"].map(encodeURIComponent).join(",");
+  const url = CWA_BASE + "F-D0047-" + id + "?Authorization=" + encodeURIComponent(key) + "&ElementName=" +
+    ["溫度", "3小時降雨機率", "天氣現象", ...(more ? Object.keys(CWA_DETAIL) : [])].map(encodeURIComponent).join(",");
   const townships = (data) => data.records && data.records.Locations && data.records.Locations[0] &&
     data.records.Locations[0].Location;
   // Just this township (~15 KB); the whole county only if CWA doesn't know the name.
@@ -410,6 +488,8 @@ async function fetchCWAForecast(key, county, town, loc) {
       if (el.ElementName === "溫度") series[k].t = num(v);
       else if (el.ElementName === "3小時降雨機率") series[k].pop = num(v);
       else if (el.ElementName === "天氣現象") series[k].wx = v;
+      else if (el.ElementName === "風向") series[k].dir = windDegrees(v);
+      else if (CWA_DETAIL[el.ElementName]) series[k][CWA_DETAIL[el.ElementName]] = num(v);
     }
   }
   return { town: place.LocationName, series };
@@ -482,32 +562,56 @@ async function fetchWeek(key, county, town) {
   return days;
 }
 
-// Open-Meteo's best-match forecast for what the blend doesn't cover: now, ten days, UV, wind, pressure.
+// Open-Meteo's hourly variables, by the names the script uses.
+const OM_HOURLY = { t: "temperature_2m", feels: "apparent_temperature", rh: "relative_humidity_2m", dew: "dew_point_2m",
+  pop: "precipitation_probability", rain: "precipitation", code: "weather_code", pressure: "pressure_msl",
+  vis: "visibility", wind: "wind_speed_10m", dir: "wind_direction_10m", gust: "wind_gusts_10m", uv: "uv_index" };
+// Open-Meteo's best-match forecast for what the blend doesn't cover: now, and ten days hour by hour (the detail
+// sheets: about 40 KB) and by day.
 async function fetchExtras(loc) {
   const data = await getJSON("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude.toFixed(4) +
     "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&wind_speed_unit=ms&forecast_days=10" +
     "&current=apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m," +
-    "pressure_msl,visibility,uv_index&hourly=pressure_msl,wind_gusts_10m" +
+    "pressure_msl,visibility,uv_index&hourly=" + Object.values(OM_HOURLY).join(",") +
     "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max",
     CONFIG.abroadTimeout);
   if (!data.daily || !data.current || !data.hourly) throw new Error("Open-Meteo extras: " + (data.reason || "bad response"));
   const d = data.daily, h = data.hourly;
   return {
     now: data.current,
-    hourly: Object.fromEntries(h.time.map((time, i) =>
-      [time.slice(0, 13), { pressure: h.pressure_msl[i], gust: h.wind_gusts_10m[i] }])),
+    hourly: Object.fromEntries(h.time.map((time, i) => [time.slice(0, 13),
+      Object.fromEntries(Object.entries(OM_HOURLY).map(([name, v]) => [name, h[v] ? h[v][i] ?? null : null]))])),
     days: Object.fromEntries(d.time.map((day, i) => [day, { code: d.weather_code[i], hi: d.temperature_2m_max[i],
       lo: d.temperature_2m_min[i], pop: d.precipitation_probability_max[i], uv: d.uv_index_max[i] }])),
   };
 }
 
-// Air quality from Open-Meteo (CAMS model, US AQI scale; Taiwan's AQI uses the same breakpoints).
+// Air quality from Open-Meteo (CAMS model, US AQI scale; Taiwan's AQI uses the same breakpoints): now, and
+// 5 days hour by hour: the index, the pollutants (µg/m³) and each one's own index (the largest is the main one).
+const AIR_HOURLY = { aqi: "us_aqi", pm25: "pm2_5", pm10: "pm10", o3: "ozone", no2: "nitrogen_dioxide", so2: "sulphur_dioxide",
+  co: "carbon_monoxide", aqiPm25: "us_aqi_pm2_5", aqiPm10: "us_aqi_pm10", aqiO3: "us_aqi_ozone", aqiNo2: "us_aqi_nitrogen_dioxide" };
 async function fetchAir(loc) {
   const data = await getJSON("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" +
-    loc.latitude.toFixed(4) + "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&current=us_aqi,pm2_5,pm10",
-    CONFIG.abroadTimeout);
+    loc.latitude.toFixed(4) + "&longitude=" + loc.longitude.toFixed(4) + "&timezone=Asia%2FTaipei&current=us_aqi,pm2_5,pm10" +
+    "&forecast_days=5&hourly=" + Object.values(AIR_HOURLY).join(","), CONFIG.abroadTimeout);
   if (!data.current) throw new Error("Open-Meteo air quality: " + (data.reason || "bad response"));
-  return { aqi: data.current.us_aqi, pm25: data.current.pm2_5, pm10: data.current.pm10 };
+  const h = data.hourly || { time: [] };
+  return { aqi: data.current.us_aqi, pm25: data.current.pm2_5, pm10: data.current.pm10,
+    hourly: h.time.length ? { start: h.time[0].slice(0, 13), ...Object.fromEntries(Object.entries(AIR_HOURLY)
+      .map(([name, v]) => [name, (h[v] || []).map((x) => (x == null ? null : Math.round(x * 10) / 10))])) } : null };
+}
+
+// The full text of each CWA warning in force (W-C0033-002), for the warnings' detail sheet: about 3 KB.
+async function fetchWarningTexts(key) {
+  const data = await getJSON(CWA_BASE + "W-C0033-002?Authorization=" + encodeURIComponent(key));
+  const list = data.records && data.records.record;
+  if (!Array.isArray(list)) throw new Error("CWA warning texts: " + (data.message || "bad response"));
+  return list.map((w) => {
+    const info = w.datasetInfo || {}, hazards = ((w.hazardConditions || {}).hazards || {}).hazard || [];
+    return { title: info.datasetDescription, issued: info.issueTime,
+      text: String(((w.contents || {}).content || {}).contentText || "").split("\n").map((l) => l.trim()).join("\n").trim(),
+      areas: hazards.flatMap((h) => (((h.info || {}).affectedAreas || {}).location || []).map((l) => l.locationName)) };
+  });
 }
 
 // The latest CWA radar composite as a transparent image, with the latitude/longitude box it covers.
@@ -750,6 +854,64 @@ function currentDetails(temp, station, extras, nowKey) {
   };
 }
 
+// Hour by hour from today 00:00 through the ten days, for the detail sheets ({ start, t: […], … }; null where
+// there's nothing). Best source first:
+//  * temperature, rain chance and amount: earlier today what the station measured; today and tomorrow the
+//    blend; later days Open-Meteo's hours fitted to the ten-day list's high, low and chance, so they agree;
+//  * feels-like, humidity, dew point, wind: CWA's township forecast (about 3 days), then Open-Meteo; the
+//    coming hours lean toward the station's reading now, as the blend does for temperature;
+//  * gusts, pressure, visibility, UV: Open-Meteo (CWA doesn't forecast them); UV fitted to each day's peak.
+function detailHours(r, cwa, extras, state) {
+  const start = r.rows[0].key.slice(0, 10) + "T00", n = r.days.length * 24;
+  const keys = Array.from({ length: n }, (_, i) => addHours(start, i)), now = keys.indexOf(r.rows[0].key);
+  const om = (extras && extras.hourly) || {}, ours = cwa || {}, rows = Object.fromEntries(r.rows.map((h) => [h.key, h]));
+  const h = { t: [], pop: [], rain: [], feels: [], rh: [], dew: [], wind: [], dir: [], gust: [], pres: [], vis: [], uv: [], wx: [] };
+  keys.forEach((k, i) => {
+    const row = i >= now && i < 48 ? rows[k] : null, o = om[k] || {}, c = ours[k] || {}, obs = state.obs[k];
+    const either = (f) => c[f] ?? o[f] ?? null;
+    h.t.push(i < now && obs && obs.t != null ? obs.t : row && row.t != null ? row.t : o.t ?? null);
+    h.pop.push(i < now ? null : row ? row.pop : c.pop ?? o.pop ?? null);
+    h.rain.push(i < now ? hourlyRain(state, addHours(k, 1)) : row ? row.rain : o.rain ?? null);
+    for (const f of ["feels", "rh", "dew", "wind", "dir"]) h[f].push(either(f));
+    h.gust.push(o.gust ?? null); h.pres.push(o.pressure ?? null); h.uv.push(o.uv ?? null);
+    h.vis.push(o.vis != null ? o.vis / 1000 : null);
+    h.wx.push((row && row.wx) || c.wx || (o.code != null ? wmoText(o.code) : null));
+  });
+  // days after tomorrow, and every day's UV, fitted to what the ten-day list says for that day
+  r.days.forEach((d, day) => {
+    const span = [day * 24, day * 24 + 24], vals = (f) => h[f].slice(...span).filter((v) => v != null);
+    const fit = (f, scale) => { for (let i = span[0]; i < span[1]; i++) if (h[f][i] != null) h[f][i] = scale(h[f][i]); };
+    if (day >= 2 && d.hi != null && d.lo != null && vals("t").length) {
+      const lo = Math.min(...vals("t")), hi = Math.max(...vals("t"));
+      fit("t", (t) => (hi > lo ? d.lo + ((t - lo) * (d.hi - d.lo)) / (hi - lo) : (d.hi + d.lo) / 2));
+    }
+    if (day >= 2 && d.pop != null && vals("pop").length) {
+      const most = Math.max(...vals("pop"));
+      fit("pop", (p) => (most > 0 ? (p * d.pop) / most : d.pop));
+    }
+    if (d.uv != null && vals("uv").length && Math.max(...vals("uv")) > 0) {
+      const most = Math.max(...vals("uv"));
+      fit("uv", (u) => (u * d.uv) / most);
+    }
+  });
+  // the coming hours lean toward the station's reading now (gone in about 4 hours)
+  const det = r.details || {};
+  for (const f of ["feels", "rh", "dew", "wind"]) {
+    if (now < 0 || det[f] == null || h[f][now] == null) continue;
+    const delta = det[f] - h[f][now];
+    for (let i = now; i < n; i++) if (h[f][i] != null) h[f][i] += delta * Math.exp(-(i - now) / CONFIG.nowcastDecayHours);
+  }
+  for (let i = 0; i < n; i++) {
+    if (h.rh[i] != null) h.rh[i] = Math.max(0, Math.min(100, h.rh[i]));
+    if (h.wind[i] != null) h.wind[i] = Math.max(0, h.wind[i]);
+    if (h.gust[i] != null && h.wind[i] != null) h.gust[i] = Math.max(h.gust[i], h.wind[i]); // a gust is never weaker
+  }
+  const round = (v, d) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d);
+  const digits = { t: 1, pop: 0, rain: 1, feels: 1, rh: 0, dew: 1, wind: 1, dir: 0, gust: 1, pres: 1, vis: 1, uv: 1 };
+  return { start, ...Object.fromEntries(Object.entries(h).map(([f, vals]) =>
+    [f, f === "wx" ? vals : vals.map((v) => round(v, digits[f]))])) };
+}
+
 // ---------------------------------------------------------------------------
 // Learning: record forecasts, verify, derive per-source bias & weight
 // ---------------------------------------------------------------------------
@@ -950,7 +1112,8 @@ async function run(apiKey, opts = {}) {
     shared("rainviewer", 5, fetchRainViewer),
     apiKey ? shared("rain radars " + apiKey, 2, () => fetchRainRadarTimes(apiKey)) : Promise.resolve({}),
     RAIN_RADARS.some((s) => distanceKm(loc, s) <= 145) ? shared("rain radar frames", 2, fetchRainRadarFrames)
-      : Promise.resolve(null)]) : null;
+      : Promise.resolve(null),
+    apiKey ? shared("warning texts " + apiKey, 5, () => fetchWarningTexts(apiKey)).catch(() => null) : null]) : null;
   // Open-Meteo's servers are in Germany and can stall from Taiwan, so CWA's requests don't wait for them.
   const modelsReq = Promise.allSettled([fetchModels(loc)]);
   const [stationsRes, townRes] = await Promise.allSettled([
@@ -966,7 +1129,7 @@ async function run(apiKey, opts = {}) {
     ? stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm)
     : place.distance <= CONFIG.maxStationKm;
   const cwaReq = stationsRes.status === "fulfilled" && inTaiwan ? Promise.allSettled([
-    fetchCWAForecast(apiKey, place.county, place.name, loc),
+    fetchCWAForecast(apiKey, place.county, place.name, loc, !!forApp),
     shared("warnings " + place.county, 5, () => fetchWarnings(apiKey, place.county)),
     forApp ? fetchWeek(apiKey, place.county, place.name) : Promise.resolve(null),
   ]) : null;
@@ -1021,7 +1184,7 @@ async function run(apiKey, opts = {}) {
     errors,
   };
   if (forApp) {
-    const [extras, air, radar, frames, rainRadarTimes, rainFrames] = (await forApp).map((res) => settled(res));
+    const [extras, air, radar, frames, rainRadarTimes, rainFrames, warningTexts] = (await forApp).map((res) => settled(res));
     const today = nowKey.slice(0, 10), tomorrow = addHours(today + "T00", 24).slice(0, 10);
     Object.assign(result, {
       loc, air, radar, frames, rainRadarTimes, rainFrames,
@@ -1032,7 +1195,10 @@ async function run(apiKey, opts = {}) {
       gustMax: extras ? Math.max(0, ...rows.slice(0, 24).map((h) => (extras.hourly[h.key] || {}).gust || 0)) : null,
       sun: [today, tomorrow].map((day) => ({ day, ...sunTimes(day, loc) })),
       moon: moonPhase(new Date()),
+      // each warning's full text and areas, for its detail sheet
+      warnings: warnings.map((w) => ({ ...w, ...((warningTexts || []).find((x) => x.title === w.title) || {}), title: w.title })),
     });
+    result.hours = detailHours(result, sources.cwa, extras, state);
   }
   if (!pinned && opts.settings) await notifyChanges(state, result, opts.settings);
   state.lastResult = result;
@@ -1143,6 +1309,67 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     testBodyWidget: "Notifications from the widget work too.",
     keyTitle: "CWA API key", keyPrompt: "Paste your 授權碼 from opendata.cwa.gov.tw (會員 → 取得授權碼).",
     keyRejected: (e) => `${e}\nPaste a new key, or Skip to keep the current one.`, save: "Save", skip: "Skip",
+    // the detail sheets (tap a card in the full view)
+    d: {
+      names: { conditions: "Conditions", rain: "Precipitation", wind: "Wind", feels: "Feels like", humidity: "Humidity",
+        visibility: "Visibility", pressure: "Pressure", uv: "UV index", air: "Air quality", sun: "Sunrise and sunset",
+        moon: "Moon", nexthour: "Next hour", warnings: "Warnings" },
+      units: { conditions: "°", rain: " mm", wind: " m/s", feels: "°", humidity: "%", visibility: " km", pressure: " hPa",
+        uv: "", air: "" },
+      close: "Close", noData: "No forecast for this day.", toRadar: "Show on the radar", now: "Now", full: "Full screen",
+      chance: "rain", gust: "gusts", actual: "actual", dew: "dew point",
+      conditions: (hi, hiAt, lo, loAt, pop, popAt) => `High ${hi} around ${hiAt}, low ${lo} around ${loAt}. ` +
+        (pop ? `Chance of rain up to ${pop}% around ${popAt}.` : "No rain expected."),
+      rain: (total, at, most, pop) => (total ? `About ${total} mm in all, most around ${at} (${most} mm).` : "No rain expected.") +
+        (pop ? ` Chance of rain up to ${pop}%.` : ""),
+      wind: (most, force, at, gust, from) => `Up to ${most} m/s (force ${force}) around ${at}` +
+        (gust ? `, gusts to ${gust} m/s` : "") + (from ? `; mostly from the ${from}.` : "."),
+      feels: (lo, hi, more, at) => `Feels like ${lo} to ${hi}. ` + (more >= 2 ? `Humidity makes it feel up to ${more}° warmer around ${at}.`
+        : more <= -2 ? `Wind makes it feel up to ${-more}° cooler around ${at}.` : "Close to the actual temperature."),
+      humidity: (lo, hi, avg, dlo, dhi) => `Humidity ${lo}–${hi}% (average ${avg}%); dew point ${dlo} to ${dhi}.`,
+      visibility: (lo, hi, at) => `${lo}–${hi} km, lowest around ${at}.`,
+      pressure: (lo, hi, trend) => `${lo}–${hi} hPa, ${trend} through the day.`,
+      trends: { rising: "rising", falling: "falling", steady: "steady" },
+      uv: (uv, level, at, from, to) => `Peaks at ${uv} (${level.toLowerCase()}) around ${at}. ` +
+        (from ? `Use sun protection ${from}–${to}.` : "Low all day."),
+      air: (aqi, level, at, main) => `Up to ${aqi} (${level.toLowerCase()}) around ${at}${main ? `, mostly ${main}` : ""}.`,
+      airAdvice: ["Air quality is good.", "Unusually sensitive people should cut down on long or heavy outdoor exercise.",
+        "Children, older adults and people with heart or lung disease should cut down on long or heavy outdoor exercise.",
+        "Everyone should cut down on long or heavy outdoor exercise; sensitive groups should avoid it.",
+        "Everyone should avoid long or heavy outdoor exercise.", "Everyone should avoid outdoor activity."],
+      sun: (rise, set, length, diff, dawn, dusk) => `Sunrise ${rise}, sunset ${set}: ${length} of daylight${diff}. ` +
+        `First light ${dawn}, last light ${dusk}.`,
+      length: (h, m) => `${h} h ${m} min`,
+      sunDiff: (min) => (min ? `, ${Math.abs(min)} min ${min > 0 ? "more" : "less"} than the day before` : ", as the day before"),
+      moon: (name, lit, rise, set, full, newMoon) => `${name}, ${lit}% lit. Moonrise ${rise}, moonset ${set}. ` +
+        `Next full moon ${full}, next new moon ${newMoon}.`,
+      labels: { dawn: "First light", rise: "Sunrise", set: "Sunset", dusk: "Last light", daylight: "Daylight",
+        moonrise: "Moonrise", moonset: "Moonset", lit: "Illumination", full: "Next full moon", newMoon: "Next new moon",
+        issued: "Issued", areas: "Areas" },
+      pollutants: { pm25: "PM2.5", pm10: "PM10", o3: "Ozone (O₃)", no2: "Nitrogen dioxide (NO₂)", so2: "Sulphur dioxide (SO₂)",
+        co: "Carbon monoxide (CO)" },
+      about: {
+        conditions: "Today and tomorrow blend CWA's township forecast, seven weather models and the nearest station. Later " +
+          "days take Open-Meteo's hours, fitted to the high and low in the ten-day list (which leans on CWA's 1-week forecast).",
+        rain: "The chance is how likely rain is in that hour. Amounts are the models' (CWA doesn't forecast them); earlier " +
+          "today, what the station measured.",
+        wind: "The average wind over 10 minutes, 10 m up; gusts are the strongest bursts. CWA's township forecast for about " +
+          "3 days, then Open-Meteo; gusts from Open-Meteo. The arrows show where the wind blows to.",
+        feels: "How warm it feels from temperature, humidity and wind (Steadman's apparent temperature, as CWA's 體感溫度). " +
+          "The dashed line is the actual temperature. CWA for about 3 days, then Open-Meteo.",
+        humidity: "How close the air is to holding all the water it can. The dew point is where dew forms: above about " +
+          "20° it feels muggy. CWA for about 3 days, then Open-Meteo.",
+        visibility: "How far you can see clearly; haze, rain and fog cut it. From Open-Meteo (CWA doesn't forecast it).",
+        pressure: "Falling pressure often brings clouds and rain, rising pressure clearer weather. Sea-level pressure, from " +
+          "Open-Meteo (CWA doesn't forecast it).",
+        uv: "The strength of the sun's ultraviolet light; from 3 up, protect your skin. Each day's peak follows CWA's " +
+          "forecast, the hours Open-Meteo's.",
+        air: "US AQI from the CAMS model via Open-Meteo, an estimate rather than station readings; Taiwan's AQI has the " +
+          "same levels.",
+        sun: "First and last light are civil twilight: the sun up to 6° below the horizon, light enough to be outdoors.",
+        moon: "Worked out from the moon's orbit, to within a few minutes.",
+      },
+    },
   },
   zh: {
     now: "現在", today: "今天", tomorrow: "明天", weekdays: ["週日", "週一", "週二", "週三", "週四", "週五", "週六"],
@@ -1200,6 +1427,56 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     testBodyApp: "通知正常。小工具下次更新時會再傳一則測試。", testBodyWidget: "小工具的通知也正常。",
     keyTitle: "CWA 授權碼", keyPrompt: "請貼上氣象資料開放平臺的授權碼（會員 → 取得授權碼）。",
     keyRejected: (e) => `${e}\n請貼上新的授權碼，或按「略過」保留目前的。`, save: "儲存", skip: "略過",
+    d: {
+      names: { conditions: "天氣概況", rain: "降雨", wind: "風", feels: "體感溫度", humidity: "濕度", visibility: "能見度",
+        pressure: "氣壓", uv: "紫外線指數", air: "空氣品質", sun: "日出與日落", moon: "月相", nexthour: "未來一小時",
+        warnings: "天氣特報" },
+      units: { conditions: "°", rain: " 毫米", wind: " 公尺/秒", feels: "°", humidity: "%", visibility: " 公里", pressure: " 百帕",
+        uv: "", air: "" },
+      close: "關閉", noData: "這一天沒有預報。", toRadar: "在雷達上看", now: "現在", full: "全螢幕",
+      chance: "降雨", gust: "陣風", actual: "實際", dew: "露點",
+      conditions: (hi, hiAt, lo, loAt, pop, popAt) => `最高 ${hi}（${hiAt} 左右），最低 ${lo}（${loAt} 左右）。` +
+        (pop ? `降雨機率最高 ${pop}%（${popAt} 左右）。` : "預計不會下雨。"),
+      rain: (total, at, most, pop) => (total ? `總雨量約 ${total} 毫米，${at} 左右最多（${most} 毫米）。` : "預計不會下雨。") +
+        (pop ? `降雨機率最高 ${pop}%。` : ""),
+      wind: (most, force, at, gust, from) => `風速最大每秒 ${most} 公尺（${force} 級，${at} 左右）` +
+        (gust ? `，陣風每秒 ${gust} 公尺` : "") + (from ? `；多為${from}風。` : "。"),
+      feels: (lo, hi, more, at) => `體感溫度 ${lo}～${hi}。` + (more >= 2 ? `濕度讓體感最多高 ${more}°（${at} 左右）。`
+        : more <= -2 ? `風讓體感最多低 ${-more}°（${at} 左右）。` : "與實際溫度相近。"),
+      humidity: (lo, hi, avg, dlo, dhi) => `相對濕度 ${lo}～${hi}%（平均 ${avg}%），露點 ${dlo}～${dhi}。`,
+      visibility: (lo, hi, at) => `能見度 ${lo}～${hi} 公里，${at} 左右最低。`,
+      pressure: (lo, hi, trend) => `氣壓 ${lo}～${hi} 百帕，整天${trend}。`,
+      trends: { rising: "上升", falling: "下降", steady: "穩定" },
+      uv: (uv, level, at, from, to) => `最高 ${uv}（${level}，${at} 左右）。` + (from ? `${from}～${to} 請做好防曬。` : "全天低量級。"),
+      air: (aqi, level, at, main) => `最高 ${aqi}（${level}，${at} 左右）${main ? `，主要來自${main}` : ""}。`,
+      airAdvice: ["空氣品質良好。", "極特殊敏感族群應減少長時間或劇烈的戶外活動。",
+        "兒童、長者及心臟或肺部疾病患者應減少長時間或劇烈的戶外活動。", "所有人都應減少長時間或劇烈的戶外活動，敏感族群應避免。",
+        "所有人都應避免長時間或劇烈的戶外活動。", "所有人都應避免戶外活動。"],
+      sun: (rise, set, length, diff, dawn, dusk) => `日出 ${rise}，日落 ${set}，白晝 ${length}${diff}。曙光 ${dawn}，暮光 ${dusk}。`,
+      length: (h, m) => `${h} 小時 ${m} 分`,
+      sunDiff: (min) => (min ? `（比前一天${min > 0 ? "長" : "短"} ${Math.abs(min)} 分）` : "（與前一天相同）"),
+      moon: (name, lit, rise, set, full, newMoon) => `${name}，亮度 ${lit}%。月出 ${rise}，月落 ${set}。下次滿月 ${full}，下次新月 ${newMoon}。`,
+      labels: { dawn: "曙光", rise: "日出", set: "日落", dusk: "暮光", daylight: "白晝", moonrise: "月出", moonset: "月落",
+        lit: "亮度", full: "下次滿月", newMoon: "下次新月", issued: "發布", areas: "地區" },
+      pollutants: { pm25: "PM2.5（細懸浮微粒）", pm10: "PM10（懸浮微粒）", o3: "臭氧（O₃）", no2: "二氧化氮（NO₂）",
+        so2: "二氧化硫（SO₂）", co: "一氧化碳（CO）" },
+      about: {
+        conditions: "今天與明天結合中央氣象署鄉鎮預報、七個數值模式與最近的測站。之後幾天採用 Open-Meteo 的逐時預報，並對齊" +
+          "十天預報（以氣象署一週預報為主）的最高與最低溫。",
+        rain: "降雨機率是這一小時下雨的可能性。雨量來自數值模式（氣象署不預報雨量）；今天稍早的是測站實測。",
+        wind: "10 公尺高、10 分鐘的平均風速；陣風是最強的瞬間風。約 3 天內採用氣象署鄉鎮預報，之後採用 Open-Meteo；陣風來自 " +
+          "Open-Meteo。箭頭指向風吹去的方向。",
+        feels: "由溫度、濕度與風算出的體感（Steadman 體感溫度，與氣象署的體感溫度相同）。虛線是實際溫度。約 3 天內採用" +
+          "氣象署預報，之後採用 Open-Meteo。",
+        humidity: "空氣中的水氣接近飽和的程度。露點是結露的溫度，高於約 20° 會覺得悶熱。約 3 天內採用氣象署預報，之後採用 Open-Meteo。",
+        visibility: "能清楚看見的距離，霾、雨與霧都會降低能見度。來自 Open-Meteo（氣象署不預報能見度）。",
+        pressure: "氣壓下降常帶來雲雨，上升則轉晴。海平面氣壓，來自 Open-Meteo（氣象署不預報氣壓）。",
+        uv: "陽光中紫外線的強度，3 以上請做好防曬。每天的最高值依氣象署預報，逐時變化來自 Open-Meteo。",
+        air: "CAMS 模式（經 Open-Meteo）估算的美國 AQI，不是測站實測；臺灣的 AQI 分級相同。",
+        sun: "曙光與暮光指民用曙暮光：太陽在地平線下 6° 以內，天色仍亮到可在戶外活動。",
+        moon: "依月球軌道推算，誤差在幾分鐘內。",
+      },
+    },
   },
 };
 let LANG = "en";
@@ -1432,6 +1709,128 @@ function outlook(r) {
   return rainSentence(r.summary, stationRain(r)) + gustText(r);
 }
 
+// What the detail sheets show (tap a card in the full view), in the current language: each hour from today
+// 00:00 (r.hours, see detailHours), and for each day a headline and a summary per sheet, the sun and the moon;
+// air quality by the hour for 5 days; warnings' full texts. null without hours.
+function detailPage(r) {
+  if (!r.hours || !r.days || !r.days.length || !r.loc) return null;
+  const w = T(), d = w.d, today = hourKey(new Date()).slice(0, 10), start = keyToDate(today + "T00");
+  const skip = Math.round((start - keyToDate(r.hours.start)) / HOUR); // a forecast saved on an earlier day
+  if (skip < 0 || skip % 24) return null;
+  const days = r.days.filter((x) => x.day >= today).slice(0, 10), n = days.length * 24;
+  const h = Object.fromEntries(Object.entries(r.hours).filter(([f]) => f !== "start").map(([f, v]) => [f, v.slice(skip, skip + n)]));
+  if (!h.t.length) return null;
+  const now = Math.round((keyToDate(hourKey(new Date())) - start) / HOUR);
+  const hh = (i) => String(i % 24).padStart(2, "0") + ":00", r1 = (v) => Math.round(v * 10) / 10;
+  const best = (vals, better) => vals.reduce((b, v, i) => (v != null && (b < 0 || better(v, vals[b])) ? i : b), -1);
+  const high = (vals) => best(vals, (a, b) => a > b), low = (vals) => best(vals, (a, b) => a < b);
+  const fmtDay = (key) => `${Number(key.slice(5, 7))}/${Number(key.slice(8, 10))}`;
+  const clock = (m) => (m == null ? "—" : hm(m));
+  h.icon = h.t.map((t, i) => EMOJI[wxSymbol(h.wx[i], h.pop[i], isNight(addHours(today + "T00", i), r.loc))]);
+  delete h.wx;
+  const out = days.map((day, i) => {
+    const s = (f) => h[f].slice(i * 24, i * 24 + 24), have = (f) => s(f).some((v) => v != null);
+    const text = {}, head = {};
+    // conditions: the day's high and low as in the ten-day list, when they happen, and the chance of rain
+    const t = s("t"), pop = s("pop"), wet = high(pop), rainy = wet >= 0 && pop[wet] >= CONFIG.rainChance;
+    text.conditions = d.conditions(fmtT(day.hi), hh(Math.max(0, high(t))), fmtT(day.lo), hh(Math.max(0, low(t))),
+      rainy ? Math.round(pop[wet]) : null, hh(wet));
+    head.conditions = (i === 0 && r.details && t[now] != null ? fmtT(r.station && r.station.t != null ? r.station.t : t[now]) + " · " : "") +
+      w.hiLoWide(fmtT(day.hi), fmtT(day.lo));
+    // precipitation: the day's total and its wettest hour
+    const rain = s("rain"), total = rain.reduce((a, v) => a + (v || 0), 0), most = high(rain);
+    text.rain = d.rain(total >= 0.1 ? r1(total) : null, hh(most), most >= 0 ? r1(rain[most]) : 0, rainy ? Math.round(pop[wet]) : null);
+    head.rain = `${r1(total)}${d.units.rain}` + (rainy ? ` · ${Math.round(pop[wet])}%` : "");
+    if (have("wind")) {
+      const wind = s("wind"), gust = s("gust"), top = high(wind), dirs = s("dir");
+      // the wind's usual direction: the average of where it comes from, weighted by its speed
+      let x = 0, y = 0;
+      dirs.forEach((deg, j) => { if (deg != null && wind[j]) { x += wind[j] * Math.sin(deg * RAD); y += wind[j] * Math.cos(deg * RAD); } });
+      const from = x || y ? compass((Math.atan2(x, y) / RAD + 360) % 360) : null;
+      text.wind = d.wind(wind[top].toFixed(1), beaufort(wind[top]), hh(top), have("gust") ? gust[high(gust)].toFixed(1) : null,
+        from && (LANG === "zh" ? w.dirs[from] : from));
+      head.wind = `${wind[top].toFixed(1)}${d.units.wind}` + (have("gust") ? ` · ${d.gust} ${gust[high(gust)].toFixed(1)}` : "");
+    }
+    if (have("feels")) {
+      const feels = s("feels"), gap = feels.map((f, j) => (f != null && t[j] != null ? f - t[j] : null)), apart = best(gap, (a, b) => Math.abs(a) > Math.abs(b));
+      text.feels = d.feels(fmtT(feels[low(feels)]), fmtT(feels[high(feels)]), apart >= 0 ? Math.round(gap[apart]) : 0, hh(apart));
+      head.feels = `${fmtT(feels[low(feels)])}–${fmtT(feels[high(feels)])}`;
+    }
+    if (have("rh")) {
+      const rh = s("rh").filter((v) => v != null), dew = s("dew");
+      text.humidity = d.humidity(Math.min(...rh), Math.max(...rh), Math.round(rh.reduce((a, v) => a + v, 0) / rh.length),
+        fmtT(dew[low(dew)]), fmtT(dew[high(dew)]));
+      head.humidity = `${Math.round(rh.reduce((a, v) => a + v, 0) / rh.length)}%`;
+    }
+    if (have("vis")) {
+      const vis = s("vis"), km = (v) => (v >= 10 ? Math.round(v) : v.toFixed(1));
+      text.visibility = d.visibility(km(vis[low(vis)]), km(vis[high(vis)]), hh(low(vis)));
+      head.visibility = `${km(vis[low(vis)])}–${km(vis[high(vis)])}${d.units.visibility}`;
+    }
+    if (have("pres")) {
+      const pres = s("pres"), seen = pres.filter((v) => v != null), change = seen[seen.length - 1] - seen[0];
+      text.pressure = d.pressure(Math.round(Math.min(...seen)), Math.round(Math.max(...seen)),
+        d.trends[Math.abs(change) < 1 ? "steady" : change > 0 ? "rising" : "falling"]);
+      head.pressure = `${Math.round(i === 0 && pres[now] != null ? pres[now] : seen[0])}${d.units.pressure} ${Math.abs(change) < 1 ? "→" : change > 0 ? "↗" : "↘"}`;
+    }
+    if (have("uv")) {
+      const uv = s("uv"), top = high(uv), level = w.uvLevels[levelOf(UV_LEVELS, uv[top])];
+      const strong = uv.map((v, j) => (v != null && v >= 3 ? j : -1)).filter((j) => j >= 0);
+      text.uv = d.uv(Math.round(uv[top]), level, hh(top), strong.length ? hh(strong[0]) : null, strong.length ? hh(strong[strong.length - 1] + 1) : null);
+      head.uv = `${Math.round(uv[top])} ${level}`;
+    }
+    // the sun: sunrise, sunset and first and last light, and how the daylight changed since the day before
+    const sun = sunTimes(day.day, r.loc), light = sunTimes(day.day, r.loc, -6);
+    const before = sunTimes(addHours(day.day + "T12", -24).slice(0, 10), r.loc), len = Math.round(sun.set - sun.rise);
+    const diff = Math.round(len - (before.set - before.rise));
+    text.sun = d.sun(hm(sun.rise), hm(sun.set), d.length(Math.floor(len / 60), len % 60), d.sunDiff(diff), hm(light.rise), hm(light.set));
+    head.sun = `${hm(sun.rise)} – ${hm(sun.set)}`;
+    // the moon: its phase at noon, rise and set
+    const phase = moonPhase(keyToDate(day.day + "T12")), mt = moonTimes(day.day, r.loc);
+    text.moon = d.moon(w.moonNames[phase.phase], Math.round(phase.lit * 100), clock(mt.rise), clock(mt.set),
+      fmtDay(hourKey(phase.nextFull)), fmtDay(hourKey(phase.nextNew)));
+    head.moon = `${phase.emoji} ${w.moonNames[phase.phase]}`;
+    const label = i === 0 ? w.today : `${w.weekdays[new Date(Date.parse(day.day + "T12:00:00+08:00")).getUTCDay()]} ${Number(day.day.slice(8))}`;
+    return { key: day.day, label, text, head,
+      sun: { dawn: hm(light.rise), rise: hm(sun.rise), set: hm(sun.set), dusk: hm(light.set), length: d.length(Math.floor(len / 60), len % 60) },
+      moon: { emoji: phase.emoji, name: w.moonNames[phase.phase], lit: Math.round(phase.lit * 100), rise: clock(mt.rise), set: clock(mt.set),
+        full: fmtDay(hourKey(phase.nextFull)), newMoon: fmtDay(hourKey(phase.nextNew)) } };
+  });
+  // air quality, 5 days by the hour, from today 00:00: each day's peak and its main pollutant
+  let air = null;
+  const ah = r.air && r.air.hourly;
+  if (ah && ah.aqi) {
+    const off = Math.round((keyToDate(ah.start) - start) / HOUR), at = (f, i) => (ah[f] || [])[i - off] ?? null;
+    const hours = Math.min(n, ah.aqi.length + off), main = [], keys = { aqiPm25: "pm25", aqiPm10: "pm10", aqiO3: "o3", aqiNo2: "no2" };
+    const series = Object.fromEntries(["aqi", "pm25", "pm10", "o3", "no2", "so2", "co"].map((f) => [f, Array.from({ length: hours }, (_, i) => at(f, i))]));
+    for (let i = 0; i < hours; i++) {
+      const top = Object.keys(keys).reduce((b, k) => (at(k, i) != null && (b == null || at(k, i) > at(b, i)) ? k : b), null);
+      main.push(top ? keys[top] : null);
+    }
+    const airDays = Math.floor(hours / 24);
+    for (let i = 0; i < airDays; i++) {
+      const vals = series.aqi.slice(i * 24, i * 24 + 24), top = high(vals);
+      if (top < 0) continue;
+      const level = levelOf(AQI_LEVELS, vals[top]);
+      out[i].text.air = d.air(Math.round(vals[top]), w.aqiLevels[level], hh(top), main[i * 24 + top] && d.pollutants[main[i * 24 + top]]);
+      out[i].text.airAdvice = d.airAdvice[level];
+      out[i].head.air = `${Math.round(vals[top])} ${w.aqiLevels[level]}`;
+    }
+    air = { days: airDays, ...series, main };
+  }
+  const calendar = Array.from({ length: 28 }, (_, i) => {
+    const key = addHours(today + "T12", i * 24);
+    return { label: fmtDay(key), emoji: moonPhase(keyToDate(key)).emoji };
+  });
+  const warnings = (r.warnings || []).map((x) => ({ title: x.title, text: x.text || "",
+    meta: [w.until(shortTime(x.until)), x.issued && `${d.labels.issued} ${shortTime(x.issued)}`].filter(Boolean).join(" · "),
+    areas: x.areas && x.areas.length ? `${d.labels.areas}：${x.areas.join("、")}` : "" }));
+  return { now, loc: [r.loc.latitude, r.loc.longitude], days: out, h, air, calendar, warnings,
+    words: { names: d.names, units: d.units, labels: d.labels, pollutants: d.pollutants, about: d.about, noData: d.noData,
+      close: d.close, toRadar: d.toRadar, now: d.now, chance: d.chance, gust: d.gust, actual: d.actual, dew: d.dew,
+      aqiLevels: w.aqiLevels, uvLevels: w.uvLevels, loading: w.loading, nhAxis: [w.now, "15", "30", "45", "60"] } };
+}
+
 // The full view: what opens when you tap a widget or run the script in Scriptable. Links to tw-weather://…
 // (places, language, notifications) are handled by main(). ui = { settings, current: "here" or a place index }.
 function detailHTML(r, ui = {}) {
@@ -1444,8 +1843,11 @@ function detailHTML(r, ui = {}) {
   const twNow = new Date(Date.now() + 8 * HOUR), today = twNow.toISOString().slice(0, 10);
   const minuteNow = twNow.getUTCHours() * 60 + twNow.getUTCMinutes();
   const d = r.details || {};
-  const card = (title, body, cls = "") => `<section class="card ${cls}">${title ? `<h2>${title}</h2>` : ""}${body}</section>`;
-  const tile = (title, big, note) => `<section class="tile"><h3>${title}</h3><p class="big">${big}</p><p>${note}</p></section>`;
+  // Cards and tiles that open a detail sheet when tapped carry data-detail (and data-day): see detailPage().
+  const dp = detailPage(r), opens = (kind, day) => (dp && kind ? ` data-detail="${kind}"${day ? ` data-day="${day}"` : ""}` : "");
+  const card = (title, body, cls = "", kind = "") =>
+    `<section class="card ${cls}"${opens(kind)}>${title ? `<h2>${title}</h2>` : ""}${body}</section>`;
+  const tile = (title, big, note, kind) => `<section class="tile"${opens(kind)}><h3>${title}</h3><p class="big">${big}</p><p>${note}</p></section>`;
   const act = (path) => `tw-weather://${path}`;
 
   // Swiping, or the dots at the bottom, moves between My Location and the saved places, as in the Weather app.
@@ -1478,7 +1880,7 @@ function detailHTML(r, ui = {}) {
   const dayRows = days.map((x, i) => {
     const name = i ? w.weekdays[new Date(Date.parse(x.day + "T12:00:00+08:00")).getUTCDay()] : w.today;
     const dot = i === 0 && cur != null ? `<em style="left:${pct(cur)}%"></em>` : "";
-    return `<li><span>${name}</span><b>${EMOJI[wxSymbol(x.wx, x.pop, false)]}<small>${x.pop >= CONFIG.rainChance ? Math.round(x.pop) + "%" : ""}</small></b>` +
+    return `<li${opens("conditions", i)}><span>${name}</span><b>${EMOJI[wxSymbol(x.wx, x.pop, false)]}<small>${x.pop >= CONFIG.rainChance ? Math.round(x.pop) + "%" : ""}</small></b>` +
       `<span class="lo">${fmtT(x.lo)}</span><span class="bar"><i style="left:${pct(x.lo)}%;right:${(100 - pct(x.hi)).toFixed(1)}%;` +
       `background:linear-gradient(90deg,${tempColor(x.lo)},${tempColor(x.hi)})"></i>${dot}</span><span>${fmtT(x.hi)}</span></li>`;
   }).join("");
@@ -1489,47 +1891,47 @@ function detailHTML(r, ui = {}) {
     const level = levelOf(AQI_LEVELS, r.air.aqi);
     tiles.push(tile(`🫁 ${w.air}`, `${Math.round(r.air.aqi)} <small>${w.aqiLevels[level]}</small>`,
       `<span class="scale aqi"><em style="left:${Math.min(100, r.air.aqi / 3).toFixed(1)}%;border-color:${AQI_LEVELS[level][1]}"></em></span>` +
-      w.aqiNote(r.air.pm25 != null ? Math.round(r.air.pm25) : null)));
+      w.aqiNote(r.air.pm25 != null ? Math.round(r.air.pm25) : null), dp && dp.air ? "air" : ""));
   }
   if (d.uv != null) {
     const max = days[0] && days[0].uv;
     tiles.push(tile(`😎 ${w.uv}`, `${Math.round(d.uv)} <small>${w.uvLevels[levelOf(UV_LEVELS, d.uv)]}</small>`,
       `<span class="scale uv"><em style="left:${Math.min(100, d.uv * 9)}%"></em></span>` +
-      (max != null ? w.uvToday(Math.round(max), w.uvLevels[levelOf(UV_LEVELS, max)]) : "")));
+      (max != null ? w.uvToday(Math.round(max), w.uvLevels[levelOf(UV_LEVELS, max)]) : ""), "uv"));
   }
   if (r.sun && r.sun.length === 2) {
     const [t0, t1] = r.sun;
-    tiles.push(minuteNow < t0.rise ? tile(`🌅 ${w.sunrise}`, hm(t0.rise), w.sunsetAt(hm(t0.set)))
-      : minuteNow > t0.set ? tile(`🌅 ${w.sunrise}`, hm(t1.rise), w.tomorrowSunset(hm(t1.set)))
-      : tile(`🌇 ${w.sunset}`, hm(t0.set), w.sunriseAt(hm(t0.rise))));
+    tiles.push(minuteNow < t0.rise ? tile(`🌅 ${w.sunrise}`, hm(t0.rise), w.sunsetAt(hm(t0.set)), "sun")
+      : minuteNow > t0.set ? tile(`🌅 ${w.sunrise}`, hm(t1.rise), w.tomorrowSunset(hm(t1.set)), "sun")
+      : tile(`🌇 ${w.sunset}`, hm(t0.set), w.sunriseAt(hm(t0.rise)), "sun"));
   }
   if (d.wind != null) {
     const dir = d.windDir != null ? compass(d.windDir) : null;
     const arrow = dir ? `<i class="arrow" style="transform:rotate(${Math.round(d.windDir + 180)}deg)">↑</i>` : "";
     tiles.push(tile(`🌬️ ${w.wind}`, w.windSpeed(d.wind.toFixed(1), beaufort(d.wind)),
-      arrow + [dir && w.from(w.dirs[dir] || dir), d.gust != null && w.gust(d.gust.toFixed(1))].filter(Boolean).join(" · ")));
+      arrow + [dir && w.from(w.dirs[dir] || dir), d.gust != null && w.gust(d.gust.toFixed(1))].filter(Boolean).join(" · "), "wind"));
   }
   if (r.rainToday != null || r.rainNext24 != null) {
-    tiles.push(tile(`💧 ${w.rain}`, w.rainToday((r.rainToday || 0).toFixed(1)), w.rainNext((r.rainNext24 || 0).toFixed(1))));
+    tiles.push(tile(`💧 ${w.rain}`, w.rainToday((r.rainToday || 0).toFixed(1)), w.rainNext((r.rainNext24 || 0).toFixed(1)), "rain"));
   }
   if (d.feels != null && cur != null) {
     const gap = d.feels - cur;
-    tiles.push(tile(`🌡️ ${w.feels}`, fmtT(d.feels), Math.abs(gap) < 1 ? w.feelsSame : gap > 0 ? w.feelsWarmer : w.feelsCooler));
+    tiles.push(tile(`🌡️ ${w.feels}`, fmtT(d.feels), Math.abs(gap) < 1 ? w.feelsSame : gap > 0 ? w.feelsWarmer : w.feelsCooler, "feels"));
   }
-  if (d.rh != null) tiles.push(tile(`💦 ${w.humidity}`, `${Math.round(d.rh)}%`, d.dew != null ? w.dew(fmtT(d.dew)) : ""));
+  if (d.rh != null) tiles.push(tile(`💦 ${w.humidity}`, `${Math.round(d.rh)}%`, d.dew != null ? w.dew(fmtT(d.dew)) : "", "humidity"));
   if (d.visibility != null) {
     const km = d.visibility / 1000;
     tiles.push(tile(`👁️ ${w.visibility}`, `${km >= 10 ? Math.round(km) : km.toFixed(1)} <small>${w.km}</small>`,
-      km >= 10 ? w.visClear : km >= 4 ? w.visHaze : w.visPoor));
+      km >= 10 ? w.visClear : km >= 4 ? w.visHaze : w.visPoor, "visibility"));
   }
   if (d.pressure != null) {
     const c = d.pressureChange, trend = c == null || Math.abs(c) < 0.5 ? "steady" : c > 0 ? "rising" : "falling";
-    tiles.push(tile(`🧭 ${w.pressure}`, `${Math.round(d.pressure)} <small>${w.hPa}</small>`, w.pressureNote(w.pressureTrend[trend])));
+    tiles.push(tile(`🧭 ${w.pressure}`, `${Math.round(d.pressure)} <small>${w.hPa}</small>`, w.pressureNote(w.pressureTrend[trend]), "pressure"));
   }
   if (r.moon) {
     const full = new Date(new Date(r.moon.nextFull).getTime() + 8 * HOUR);
     tiles.push(tile(`${r.moon.emoji} ${w.moon}`, w.moonNames[r.moon.phase ?? 0],
-      w.moonNote(Math.round(r.moon.lit * 100), `${full.getUTCMonth() + 1}/${full.getUTCDate()}`)));
+      w.moonNote(Math.round(r.moon.lit * 100), `${full.getUTCMonth() + 1}/${full.getUTCDate()}`), "moon"));
   }
 
   // Radar: RainViewer's last two hours as an animation, else CWA's latest image.
@@ -1542,13 +1944,15 @@ function detailHTML(r, ui = {}) {
     url: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/${s.id}.png`,
     time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16) })).sort((a, b) => a.km - b.km) : [];
   const radar = mapSource && r.loc ? card(`🛰️ ${w.radar}`,
+    `<button type="button" class="expand" id="map-full" aria-label="${w.d.full}">⤢</button>` +
     `<div class="tabs"><button type="button" class="on" data-tab="move">${w.radarTabs[0]}</button>` +
     `<button type="button" data-tab="cwa">${w.radarTabs[1]}</button></div><div id="map"></div>` +
     `<div id="cwa-view" hidden><div class="tabs" id="stations">${rainRadars.map((s, i) =>
       `<button type="button" data-i="${i}"${i ? "" : ' class="on"'}>${s.name}</button>`).join("")}</div>` +
     `<div id="cwa-map"></div><p class="note" id="cwa-note">${esc(w.cwaRadarNote(rainRadars[0].name, rainRadars[0].time))}</p></div>` +
     `<p class="note" id="radar-note">` + (frames.length ? `<button id="play" type="button">▶︎ ${w.play}</button> ` : "") +
-    `<span id="radar-time">${esc(w.radarNote(frames.length ? "RainViewer" : w.radar, frames.length ? frames[frames.length - 1].time : cwaRadar.time))}</span></p>`) : "";
+    `<span id="radar-time">${esc(w.radarNote(frames.length ? "RainViewer" : w.radar, frames.length ? frames[frames.length - 1].time : cwaRadar.time))}</span></p>`,
+    "radar") : "";
   // The next hour, worked out in the page from radar images, their colours read back as dBZ: the last 20 minutes
   // of the nearest CWA 降雨雷達 that sees where you are (every 2 minutes, from 145 km), else RainViewer's.
   const twHM = (ms) => hm((ms / 60000 + 8 * 60) % 1440);
@@ -1560,7 +1964,7 @@ function detailHTML(r, ui = {}) {
   const nhRV = frames.length >= 3 ? { host: r.frames.host, frames: r.frames.frames.slice(-3), note: w.nhFromRV(frames[frames.length - 1].time) } : null;
   const nextHour = r.loc && (nhRadars.length || nhRV) ? card(`☔ ${w.nextHour}`, `<p class="summary" id="nh-text">${w.loading}</p>` +
     `<div class="nh-chart" id="nh-chart"></div><p class="nh-axis"><span>${w.now}</span><span>${w.min30}</span><span>${w.min60}</span></p>` +
-    `<p class="nh-note" id="nh-source"></p>`) : "";
+    `<p class="nh-note" id="nh-source"></p>`, "", dp ? "nexthour" : "") : "";
   const nhWords = { none: w.nhNone, start: w.nhStart, stop: w.nhStop, all: w.nhAll, kinds: w.nhKinds, unavailable: w.nhUnavailable,
     amount: w.nhAmount("{mm}") };
   // Once the radar is read, the hourly card follows it for the coming hour (radarOutlook): the hours it decides are
@@ -1668,6 +2072,35 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
 .nh-chart { display: flex; align-items: flex-end; gap: 3px; height: 54px; }
 .nh-chart i { flex: 1; min-height: 2px; background: #7cc4ff; border-radius: 2px 2px 0 0; }
 .nh-axis { display: flex; justify-content: space-between; margin: 4px 0 0; font-size: 12px; color: var(--dim); }
+[data-detail] { cursor: pointer; -webkit-tap-highlight-color: rgba(255, 255, 255, .08); }
+.radar { position: relative; } .expand { position: absolute; top: 8px; right: 10px; z-index: 5; color: #fff; border: 0;
+  font: 15px -apple-system, system-ui, sans-serif; background: rgba(0, 0, 0, .25); border-radius: 10px; padding: 2px 8px; }
+.radar.full { position: fixed; inset: 0; z-index: 2600; border-radius: 0; overflow-y: auto; background: #1d2a40;
+  padding-top: max(14px, env(safe-area-inset-top)); } .radar.full #map, .radar.full #cwa-map { height: calc(100vh - 170px); }
+#detail { padding: max(28px, env(safe-area-inset-top)) 10px 10px; }
+.sheet .detail { display: block; max-height: none; height: 100%; box-sizing: border-box; overflow-y: auto; }
+.d-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.d-head h2 { margin: 0; font-size: 17px; color: #fff; text-transform: none; letter-spacing: 0; }
+.sheet .d-head button { color: #fff; background: rgba(255, 255, 255, .16); border-radius: 15px; width: 30px; height: 30px; padding: 0; }
+.tabs:empty { display: none; }
+.d-big { font-size: 26px; margin: 4px 0 0; } .d-pick { min-height: 19px; margin: 2px 0 4px; font-size: 14px; color: #7cc4ff; }
+#d-chart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+#d-chart .g { stroke: rgba(255, 255, 255, .14); } #d-chart .yl, #d-chart .xl { fill: var(--dim); font-size: 10px; }
+#d-chart .xl { text-anchor: middle; } #d-chart .line { fill: none; stroke-width: 2.5; stroke-linejoin: round; }
+#d-chart .second { fill: none; stroke: #fff; stroke-opacity: .55; stroke-width: 1.5; stroke-dasharray: 4 3; }
+#d-chart .area { opacity: .18; } #d-chart .past { fill: rgba(0, 0, 0, .28); } #d-chart .dot { fill: #fff; }
+#d-chart .nowl { stroke: #fff; stroke-width: 1; stroke-dasharray: 3 3; } #d-chart .cur { stroke: #fff; stroke-opacity: .8; }
+#d-chart .top { font-size: 14px; text-anchor: middle; fill: #fff; }
+#d-chart .pct { fill: #7cc4ff; font-size: 9px; font-weight: 600; text-anchor: middle; }
+.d-text { font-size: 15px; margin: 12px 0 0; } .d-about { font-size: 13px; color: var(--dim); margin: 10px 0 0; }
+.d-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.d-list li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 15px; }
+.d-cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 12px; text-align: center; font-size: 11px;
+  color: var(--dim); } .d-cal b { display: block; font-size: 22px; font-weight: 400; }
+.d-warn h3 { margin: 14px 0 2px; font-size: 16px; color: #ffd166; text-transform: none; letter-spacing: 0; }
+.d-warn p { margin: 4px 0; font-size: 14px; white-space: pre-line; } .d-warn .d-meta { color: var(--dim); font-size: 13px; }
+.sheet .d-go { margin-top: 12px; font: 15px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255, 255, 255, .18);
+  border-radius: 12px; padding: 8px 14px; }
 </style></head><body class="${sky}" data-loading="${w.loading}" data-enter="${ui.enter || ""}"><main>
 <nav class="places">${chips}</nav>
 <header class="hero">
@@ -1679,9 +2112,9 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
   <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>
 </header>
 ${r.stale ? card("", `<p>${w.staleBanner} ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
-${warnings ? card("", warnings, "alert") : ""}
+${warnings ? card("", warnings, "alert", dp && dp.warnings.length ? "warnings" : "") : ""}
 ${nextHour}
-${card("", `<p class="summary" id="outlook">${outlook(r)}</p><ol class="hours">${hours}</ol>`)}
+${card("", `<p class="summary" id="outlook">${outlook(r)}</p><ol class="hours">${hours}</ol>`, "", dp ? "conditions" : "")}
 ${days.length ? card(`📅 ${w.days(days.length)}`, `<ol class="days">${dayRows}</ol>`) : ""}
 ${radar}
 ${tiles.length ? `<div class="tiles">${tiles.join("")}</div>` : ""}
@@ -1700,6 +2133,10 @@ ${dots}
 <div class="sheet" id="picker" hidden><div class="card"><h2>${w.addTitle}</h2>
 <input id="q" type="search" placeholder="${esc(w.search)}" autocomplete="off"><ol id="results"></ol>
 <button type="button" id="cancel">${w.cancel}</button></div></div>
+${dp ? `<div class="sheet" id="detail" hidden><div class="card detail" role="dialog">
+<div class="d-head"><h2 id="d-title"></h2><button type="button" id="d-close" aria-label="${esc(w.d.close)}">✕</button></div>
+<div class="tabs" id="d-kinds"></div><div class="tabs" id="d-days"></div><p class="d-big" id="d-big"></p><p class="d-pick" id="d-pick"></p>
+<div id="d-chart"></div><div id="d-more"></div><p class="d-text" id="d-text"></p><p class="d-about" id="d-about"></p></div></div>` : ""}
 <script>
 const towns = ${JSON.stringify(townNames)};
 const picker = document.getElementById("picker"), q = document.getElementById("q"), results = document.getElementById("results");
@@ -1729,7 +2166,7 @@ let touching = false;
 (() => {
   const main = document.querySelector("main"), incoming = document.getElementById("incoming");
   let x0 = null, y0 = 0, dx = 0, sideways = null;
-  const own = (t) => t.closest(".hours, #map, #cwa-map, .places, .tabs, .sheet, input, table");
+  const own = (t) => t.closest(".hours, #map, #cwa-map, .places, .tabs, .sheet, .radar.full, input, table");
   document.addEventListener("touchstart", (e) => {
     touching = true;
     x0 = order.length > 1 && !own(e.target) ? e.touches[0].clientX : null;
@@ -1772,6 +2209,7 @@ let touching = false;
 })();
 // For the script: how far the page is scrolled, and whether redrawing it now would get in the way.
 window.pageState = () => ({ y: Math.round(window.scrollY), busy: touching || !picker.hidden ||
+  !!document.querySelector("#detail:not([hidden]), .radar.full") ||
   !!document.querySelector("#cwa-view:not([hidden])") || document.body.classList.contains("playing") });
 ${ui.scrollY ? `window.scrollTo(0, ${Math.round(ui.scrollY)});` : ""}
 </script>
@@ -1826,6 +2264,11 @@ if (window.L) {
     L.imageOverlay(cwa.url + "?t=" + Date.now(), cwa.bounds, { opacity: 0.8 }).addTo(map);
   }
   L.circleMarker(here, { radius: 6, color: "#fff", weight: 2, fillColor: "#0a84ff", fillOpacity: 1 }).addTo(map);
+  // ⤢: the radar card fills the screen (again to go back)
+  document.getElementById("map-full").addEventListener("click", () => {
+    document.querySelector(".radar").classList.toggle("full");
+    setTimeout(() => { map.invalidateSize(); if (cwaMap) cwaMap.invalidateSize(); }, 60);
+  });
 
   // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it.
   let cwaMap = null;
@@ -1948,10 +2391,236 @@ addEventListener("load", async () => {
       chance.textContent = "";
       if (/🌧|🌦|⛈/u.test(icon.textContent) && !(i === 0 && plan.keepNow)) icon.textContent = "☁️";
     });
+    window.nhResult = { steps: s, text: box.textContent, note: document.getElementById("nh-source").textContent };
   } catch (e) {
     box.textContent = words.unavailable;
+    window.nhResult = { steps: null, text: words.unavailable, note: "" };
   }
+  document.dispatchEvent(new Event("nowcast")); // for the next hour's detail sheet
 });
+</script>` : ""}
+${dp ? `<script>
+${sunElevation.toString()}
+${tempColor.toString()}
+const DETAIL = ${JSON.stringify(dp).replace(/</g, "\\u003c")};
+// The detail sheets: tap a card or tile for its day hour by hour, with the other days and conditions a tap away
+// (as in the Weather app). Touch a chart and move along it to read each hour.
+(() => {
+  const D = DETAIL, W = D.words, $ = (id) => document.getElementById(id), sheet = $("detail");
+  const HOURLY = ["conditions", "rain", "wind", "feels", "humidity", "visibility", "pressure", "uv"];
+  const FIELD = { conditions: "t", rain: "rain", wind: "wind", feels: "feels", humidity: "rh", visibility: "vis", pressure: "pres", uv: "uv" };
+  const AQI = [[50, "#4cd964"], [100, "#ffcc00"], [150, "#ff9500"], [200, "#ff3b30"], [300, "#af52de"], [1e9, "#8e1b3a"]];
+  const UVC = [[2, "#4cd964"], [5, "#ffcc00"], [7, "#ff9500"], [10, "#ff3b30"], [1e9, "#af52de"]];
+  const color = (scale, v) => scale.find((s) => v <= s[0])[1];
+  const FMT = { conditions: (v) => Math.round(v) + "°", feels: (v) => Math.round(v) + "°", humidity: (v) => Math.round(v) + "%",
+    rain: (v) => v.toFixed(1) + W.units.rain, wind: (v) => v.toFixed(1) + W.units.wind,
+    visibility: (v) => (v >= 10 ? Math.round(v) : v.toFixed(1)) + W.units.visibility, pressure: (v) => Math.round(v) + W.units.pressure,
+    uv: (v) => String(Math.round(v)), air: (v) => String(Math.round(v)) };
+  // each chart's scale (at least span wide), the room above it for icons, and how it's drawn
+  const CFG = { conditions: { span: 4, top: 38, line: "url(#tg)", area: true }, rain: { min: 0, span: 1, top: 22, bars: () => "#4aa3ff" },
+    wind: { min: 0, span: 4, top: 24, line: "#7cc4ff", second: "gust" }, feels: { span: 4, top: 10, line: "#ffb35c", second: "t" },
+    humidity: { min: 0, max: 100, span: 100, top: 10, line: "#5ac8fa", area: true },
+    visibility: { min: 0, span: 5, top: 10, line: "#9be29b", area: true }, pressure: { span: 6, top: 10, line: "#c3b5ff" },
+    uv: { min: 0, span: 6, top: 10, bars: (v) => color(UVC, v) }, air: { min: 0, span: 50, top: 10, bars: (v) => color(AQI, v) } };
+  const ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"], arrow = (from) => ARROWS[Math.round(((from + 180) % 360) / 45) % 8];
+  const hh = (i) => (i < 10 ? "0" : "") + i + ":00";
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const list = (rows) => '<ul class="d-list">' + rows.map((r) => "<li><span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span></li>").join("") + "</ul>";
+  let kind = "conditions", day = 0;
+  const hours = (arr) => (arr || []).slice(day * 24, day * 24 + 24);
+  const series = (k) => (k === "air" ? hours(D.air && D.air.aqi) : hours(D.h[FIELD[k]]));
+  const X0 = 14, X1 = 296, Y1 = 148, xAt = (i) => X0 + (i * (X1 - X0)) / 23;
+  const svg = (parts) => '<svg viewBox="0 0 330 168" xmlns="http://www.w3.org/2000/svg">' + parts.join("") + "</svg>";
+
+  // A day's chart: its hours as a line (with a soft fill) or bars, the scale on the right and the hours below;
+  // today's past hours dimmed and a line at now.
+  function chart(vals, cfg) {
+    const extra = cfg.second ? hours(D.h[cfg.second]) : [], seen = vals.concat(extra).filter((v) => v != null);
+    if (!seen.length) return "";
+    let lo = cfg.min != null ? cfg.min : Math.min(...seen), hi = Math.max(...seen, cfg.max != null ? cfg.max : -1e9);
+    if (hi - lo < cfg.span) {
+      if (cfg.min != null) hi = lo + cfg.span;
+      else { const mid = (hi + lo) / 2; lo = mid - cfg.span / 2; hi = mid + cfg.span / 2; }
+    }
+    const rough = (hi - lo) / 3, mag = Math.pow(10, Math.floor(Math.log10(rough)));
+    const step = [1, 2, 5, 10].map((k) => k * mag).find((s) => s >= rough);
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    const top = cfg.top, y = (v) => Y1 - ((v - lo) / (hi - lo)) * (Y1 - top), out = [];
+    const today = day === 0 && D.now >= 0 && D.now < 24;
+    if (cfg.line === "url(#tg)") {
+      out.push('<defs><linearGradient id="tg" gradientUnits="userSpaceOnUse" x1="0" y1="' + Y1 + '" x2="0" y2="' + top + '">' +
+        '<stop offset="0" stop-color="' + tempColor(lo) + '"/><stop offset="1" stop-color="' + tempColor(hi) + '"/></linearGradient></defs>');
+    }
+    for (let v = lo; v <= hi + step / 2; v += step) {
+      out.push('<line class="g" x1="' + X0 + '" x2="' + X1 + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+        '<text class="yl" x="' + (X1 + 5) + '" y="' + (y(v) + 3.5) + '">' + Math.round(v * 10) / 10 + "</text>");
+    }
+    for (const i of [0, 6, 12, 18]) out.push('<text class="xl" x="' + xAt(i) + '" y="' + (Y1 + 15) + '">' + hh(i).slice(0, 2) + "</text>");
+    if (today && D.now > 0) out.push('<rect class="past" x="' + X0 + '" y="' + top + '" width="' + (xAt(D.now) - X0) + '" height="' + (Y1 - top) + '"/>');
+    if (cfg.bars) {
+      const w = ((X1 - X0) / 24) * 0.72;
+      vals.forEach((v, i) => {
+        if (v != null && v > 0) out.push('<rect x="' + (xAt(i) - w / 2) + '" y="' + y(v) + '" width="' + w + '" height="' + (Y1 - y(v)) + '" rx="1.5" fill="' + cfg.bars(v) + '"/>');
+      });
+    } else {
+      const path = (arr) => {
+        let d = "", pen = false;
+        arr.forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? "L" : "M") + xAt(i).toFixed(1) + " " + y(v).toFixed(1); pen = true; });
+        return d;
+      };
+      if (cfg.second) out.push('<path class="second" d="' + path(extra) + '"/>');
+      const line = path(vals);
+      if (cfg.area && line.lastIndexOf("M") === 0) {
+        const first = vals.findIndex((v) => v != null), last = vals.length - 1 - vals.slice().reverse().findIndex((v) => v != null);
+        out.push('<path class="area" fill="' + cfg.line + '" d="' + line + "L" + xAt(last) + " " + Y1 + "L" + xAt(first) + " " + Y1 + 'Z"/>');
+      }
+      out.push('<path class="line" stroke="' + cfg.line + '" d="' + line + '"/>');
+    }
+    if (today) {
+      out.push('<line class="nowl" x1="' + xAt(D.now) + '" x2="' + xAt(D.now) + '" y1="' + top + '" y2="' + Y1 + '"/>');
+      if (!cfg.bars && vals[D.now] != null) out.push('<circle class="dot" cx="' + xAt(D.now) + '" cy="' + y(vals[D.now]) + '" r="4"/>');
+    }
+    // along the top: the hours' weather and rain chances, or where the wind blows
+    const pop = hours(D.h.pop), icons = hours(D.h.icon), dirs = hours(D.h.dir);
+    for (let i = 0; i < 24; i += 2) {
+      const chance = pop[i] != null && pop[i] >= 20 ? Math.round(pop[i]) + "%" : "";
+      if (kind === "conditions") {
+        out.push('<text class="top" x="' + xAt(i) + '" y="14">' + (icons[i] || "") + "</text>");
+        if (chance) out.push('<text class="pct" x="' + xAt(i) + '" y="30">' + chance + "</text>");
+      } else if (kind === "rain" && chance) out.push('<text class="pct" x="' + xAt(i) + '" y="14">' + chance + "</text>");
+      else if (kind === "wind" && dirs[i] != null) out.push('<text class="top" x="' + xAt(i) + '" y="15">' + arrow(dirs[i]) + "</text>");
+    }
+    out.push('<line id="d-cur" class="cur" x1="0" x2="0" y1="' + top + '" y2="' + Y1 + '" visibility="hidden"/>');
+    return svg(out);
+  }
+
+  // The sun's height through the day, with the horizon, twilight below it and where the sun is now.
+  function sunChart(info) {
+    const start = Date.parse(info.key + "T00:00:00+08:00"), pts = [];
+    for (let m = 0; m <= 1440; m += 10) pts.push([m, sunElevation(start + m * 60000, D.loc[0], D.loc[1])]);
+    const lo = -25, hi = Math.max(60, ...pts.map((p) => p[1])) + 5, top = 10;
+    const x = (m) => X0 + (m / 1440) * (X1 - X0), y = (v) => Y1 - ((v - lo) / (hi - lo)) * (Y1 - top);
+    const line = pts.map((p, i) => (i ? "L" : "M") + x(p[0]).toFixed(1) + " " + y(p[1]).toFixed(1)).join("");
+    const out = ['<defs><clipPath id="sky"><rect x="0" y="0" width="330" height="' + y(0) + '"/></clipPath></defs>',
+      '<rect x="' + X0 + '" y="' + y(0) + '" width="' + (X1 - X0) + '" height="' + (y(-6) - y(0)) + '" fill="rgba(255,255,255,.1)"/>',
+      '<line class="g" x1="' + X0 + '" x2="' + X1 + '" y1="' + y(0) + '" y2="' + y(0) + '" style="stroke-opacity:.7"/>',
+      '<path d="' + line + "L" + x(1440) + " " + y(lo) + "L" + x(0) + " " + y(lo) + 'Z" fill="#ffd166" opacity=".22" clip-path="url(#sky)"/>',
+      '<path class="line" stroke="#ffd166" d="' + line + '"/>'];
+    for (const m of [0, 360, 720, 1080]) out.push('<text class="xl" x="' + x(m) + '" y="' + (Y1 + 15) + '">' + hh(m / 60).slice(0, 2) + "</text>");
+    if (day === 0) {
+      const t = new Date(Date.now() + 8 * 3600e3), m = t.getUTCHours() * 60 + t.getUTCMinutes();
+      out.push('<circle cx="' + x(m) + '" cy="' + y(sunElevation(Date.now(), D.loc[0], D.loc[1])) + '" r="6" fill="#ffd166" stroke="#fff" stroke-width="1.5"/>');
+    }
+    return svg(out);
+  }
+
+  // The next hour's rain rate every 5 minutes (from the radar, as on its card).
+  function nextHourChart(steps) {
+    const hi = Math.max(2, ...steps.map((s) => s.mmh)), top = 10, y = (v) => Y1 - (v / hi) * (Y1 - top);
+    const w = ((X1 - X0) / 13) * 0.7, x = (i) => X0 + w / 2 + (i * (X1 - X0 - w)) / 12, out = [];
+    for (const v of [0, hi / 2, hi]) {
+      out.push('<line class="g" x1="' + X0 + '" x2="' + X1 + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+        '<text class="yl" x="' + (X1 + 5) + '" y="' + (y(v) + 3.5) + '">' + Math.round(v * 10) / 10 + "</text>");
+    }
+    steps.forEach((s, i) => { if (s.mmh > 0) out.push('<rect x="' + (x(i) - w / 2) + '" y="' + y(s.mmh) + '" width="' + w + '" height="' + (Y1 - y(s.mmh)) + '" rx="1.5" fill="#4aa3ff"/>'); });
+    W.nhAxis.forEach((label, k) => out.push('<text class="xl" x="' + x(k * 3) + '" y="' + (Y1 + 15) + '">' + esc(label) + "</text>"));
+    return svg(out);
+  }
+
+  // Touching or moving along a chart: that hour's values above it.
+  function pick(i) {
+    const v = series(kind)[i], cur = $("d-cur"), at = (f) => hours(D.h[f])[i];
+    if (cur) { cur.setAttribute("x1", xAt(i)); cur.setAttribute("x2", xAt(i)); cur.setAttribute("visibility", "visible"); }
+    let text = hh(i) + "  " + (kind === "conditions" && at("icon") ? at("icon") + " " : "") + (v == null ? "–" : FMT[kind](v));
+    if ((kind === "conditions" || kind === "rain") && at("pop") != null && at("pop") >= 20) text += " · " + W.chance + " " + Math.round(at("pop")) + "%";
+    if (kind === "wind") text += (at("gust") != null ? " · " + W.gust + " " + at("gust").toFixed(1) : "") + (at("dir") != null ? " " + arrow(at("dir")) : "");
+    if (kind === "feels" && at("t") != null) text += " · " + W.actual + " " + Math.round(at("t")) + "°";
+    if (kind === "humidity" && at("dew") != null) text += " · " + W.dew + " " + Math.round(at("dew")) + "°";
+    if (kind === "air" && v != null) { text += " " + W.aqiLevels[AQI.findIndex((s) => v <= s[0])]; pollutants(i); }
+    $("d-pick").textContent = text;
+  }
+  function pollutants(i) {
+    const at = (f) => (D.air[f] || [])[day * 24 + i];
+    $("d-more").innerHTML = list(["pm25", "pm10", "o3", "no2", "so2", "co"].map((f) => [W.pollutants[f], at(f) == null ? "–" : Math.round(at(f)) + " µg/m³"]));
+  }
+
+  function render() {
+    const hourly = HOURLY.includes(kind) || kind === "air";
+    const count = kind === "air" ? (D.air ? D.air.days : 0) : kind === "nexthour" || kind === "warnings" ? 0 : D.days.length;
+    if (day >= Math.max(1, count)) day = 0;
+    const info = D.days[day] || D.days[0];
+    $("d-title").textContent = W.names[kind] || "";
+    $("d-kinds").innerHTML = HOURLY.includes(kind) ? HOURLY.map((k) =>
+      '<button type="button" data-k="' + k + '"' + (k === kind ? ' class="on"' : "") + ">" + esc(W.names[k]) + "</button>").join("") : "";
+    $("d-days").innerHTML = D.days.slice(0, count).map((x, i) =>
+      '<button type="button" data-d="' + i + '"' + (i === day ? ' class="on"' : "") + ">" + esc(x.label) + "</button>").join("");
+    $("d-big").textContent = info.head[kind] || "";
+    $("d-pick").textContent = "";
+    $("d-more").innerHTML = "";
+    $("d-text").textContent = info.text[kind] || (hourly ? W.noData : "");
+    $("d-about").textContent = W.about[kind] || "";
+    let chartHTML = "";
+    if (hourly) {
+      chartHTML = chart(series(kind), CFG[kind]);
+      if (kind === "air" && info.text.airAdvice) $("d-text").textContent += " " + info.text.airAdvice;
+    } else if (kind === "sun") {
+      chartHTML = sunChart(info);
+      const s = info.sun, L = W.labels;
+      $("d-more").innerHTML = list([[L.dawn, s.dawn], [L.rise, s.rise], [L.set, s.set], [L.dusk, s.dusk], [L.daylight, s.length]]);
+    } else if (kind === "moon") {
+      const m = info.moon, L = W.labels;
+      $("d-big").textContent = m.emoji + " " + m.name;
+      $("d-more").innerHTML = list([[L.lit, m.lit + "%"], [L.moonrise, m.rise], [L.moonset, m.set], [L.full, m.full], [L.newMoon, m.newMoon]]) +
+        '<div class="d-cal">' + D.calendar.map((c) => "<span><b>" + c.emoji + "</b>" + esc(c.label) + "</span>").join("") + "</div>";
+    } else if (kind === "nexthour") {
+      const nh = window.nhResult;
+      $("d-big").textContent = nh ? nh.text : W.loading;
+      chartHTML = nh && nh.steps ? nextHourChart(nh.steps) : "";
+      $("d-text").textContent = nh ? nh.note : "";
+      $("d-more").innerHTML = '<button type="button" class="d-go" id="d-go">' + esc(W.toRadar) + "</button>";
+    } else if (kind === "warnings") {
+      $("d-more").innerHTML = '<div class="d-warn">' + D.warnings.map((x) => "<h3>" + esc(x.title) + '</h3><p class="d-meta">' + esc(x.meta) +
+        "</p>" + (x.areas ? '<p class="d-meta">' + esc(x.areas) + "</p>" : "") + (x.text ? "<p>" + esc(x.text) + "</p>" : "")).join("") + "</div>";
+    }
+    $("d-chart").innerHTML = chartHTML;
+    // air quality: the pollutants now, or at the day's worst hour
+    if (kind === "air" && D.air) {
+      const vals = series("air");
+      pick(day === 0 && D.now >= 0 && vals[D.now] != null ? D.now : vals.indexOf(Math.max(...vals.filter((v) => v != null))));
+    }
+  }
+
+  document.addEventListener("click", (e) => {
+    const open = e.target.closest("[data-detail]");
+    if (open && !sheet.contains(open)) {
+      kind = open.dataset.detail; day = Number(open.dataset.day || 0);
+      sheet.hidden = false;
+      render();
+      sheet.firstElementChild.scrollTop = 0;
+      return;
+    }
+    const k = e.target.closest("#d-kinds [data-k]"), d = e.target.closest("#d-days [data-d]");
+    if (k) { kind = k.dataset.k; render(); }
+    if (d) { day = Number(d.dataset.d); render(); }
+    if (e.target.closest("#d-close") || e.target === sheet) sheet.hidden = true;
+    if (e.target.closest("#d-go")) { // the next hour on the 降雨雷達
+      sheet.hidden = true;
+      const tab = document.querySelector('[data-tab="cwa"]'), radar = document.querySelector(".radar");
+      if (tab) tab.click();
+      if (radar) radar.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
+  const follow = (e) => {
+    const chartSVG = $("d-chart").querySelector("svg");
+    if (!chartSVG || !(HOURLY.includes(kind) || kind === "air")) return;
+    const box = chartSVG.getBoundingClientRect(), p = e.touches ? e.touches[0] : e, ux = ((p.clientX - box.left) / box.width) * 330;
+    pick(Math.max(0, Math.min(23, Math.round(((ux - X0) / (X1 - X0)) * 23))));
+  };
+  $("d-chart").addEventListener("touchstart", follow, { passive: true });
+  $("d-chart").addEventListener("touchmove", follow, { passive: true });
+  $("d-chart").addEventListener("mousemove", follow);
+  document.addEventListener("nowcast", () => { if (!sheet.hidden && kind === "nexthour") render(); });
+})();
 </script>` : ""}
 </body></html>`;
 }

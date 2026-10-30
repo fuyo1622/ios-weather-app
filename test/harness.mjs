@@ -652,9 +652,112 @@ await test("app view: ten days, details, air quality and radar are fetched only 
     assert.ok(E.env.html.includes(tile + "</h3>"), tile);
   }
   assert.ok(/Sunset<\/h3>|Sunrise<\/h3>/.test(E.env.html));
-  assert.equal((E.env.html.match(/<li><span>(Today|Sun|Mon|Tue|Wed|Thu|Fri|Sat)<\/span>/g) || []).length, 10);
+  // each of the ten days opens its detail sheet
+  assert.equal((E.env.html.match(/<li data-detail="conditions"(?: data-day="\d")?><span>(Today|Sun|Mon|Tue|Wed|Thu|Fri|Sat)<\/span>/g) || []).length, 10);
   assert.ok((E.env.html.match(/<li( class="sun")?><span>/g) || []).length >= 25, "25 hours plus sunrise/sunset");
   fs.writeFileSync(path.join(E.stateDir, "app.html"), E.env.html);
+});
+
+// What the page's detail sheets are given (const DETAIL = …), and every inline script of a page compiled.
+const detailOf = (html) => JSON.parse(html.split("\n").find((l) => l.startsWith("const DETAIL = ")).slice(15, -1));
+const scriptsCompile = (html) => [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].forEach((m, i) => {
+  try { new Function(m[1]); } catch (e) { throw new Error(`page script ${i + 1}: ${e.message}`); }
+});
+
+await test("detail sheets: every card and tile opens one; ten days of hours, agreeing with the ten-day list", async () => {
+  reset({ at: E.tw("2026-10-02T10:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  for (const t of ["10:20", "11:20", "12:20"]) { E.clock.now = E.tw("2026-10-02T" + t); await W.run("KEY"); } // what the station measured
+  E.clock.now = E.tw("2026-10-02T13:20");
+  E.net.warnings = [{ phenomena: "陸上強風", significance: "特報", end: "2026-10-02 23:00:00" }];
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  const html = E.env.html, r = E.readState().lastResult, D = detailOf(html);
+  scriptsCompile(html);
+  for (const kind of ["conditions", "nexthour", "warnings", "air", "uv", "sun", "wind", "rain", "feels", "humidity", "visibility", "pressure", "moon"]) {
+    assert.ok(html.includes(`data-detail="${kind}"`), kind);
+  }
+  assert.ok(html.includes('<div class="sheet" id="detail" hidden>') && html.includes('id="map-full"'));
+  // the hours: today 00:00 to the tenth day's 23:00, every series as long
+  assert.equal(r.hours.start, "2026-10-02T00");
+  assert.deepEqual([D.days.length, D.now, D.h.t.length], [10, 13, 240]);
+  for (const [f, vals] of Object.entries(D.h)) assert.equal(vals.length, 240, f);
+  // earlier today: what the station measured; today and tomorrow: the blend
+  assert.deepEqual([10, 11, 12].map((i) => D.h.t[i]), [10, 11, 12].map((h) => Math.round(E.world.temp(E.tw(`2026-10-02T${h}:00`)) * 10) / 10));
+  r.rows.slice(0, 35).forEach((row, i) => assert.equal(D.h.t[13 + i], Math.round(row.t * 10) / 10, row.key));
+  // later days: their high, low, rain chance and UV peak are the ten-day list's
+  r.days.forEach((d, day) => {
+    const s = (f) => D.h[f].slice(day * 24, day * 24 + 24).filter((v) => v != null);
+    if (day >= 2) {
+      assert.ok(Math.abs(Math.max(...s("t")) - d.hi) < 0.06 && Math.abs(Math.min(...s("t")) - d.lo) < 0.06, `${d.day}: ${Math.min(...s("t"))}–${Math.max(...s("t"))} vs ${d.lo}–${d.hi}`);
+      assert.ok(Math.abs(Math.max(...s("pop")) - d.pop) < 0.6, `${d.day} chance ${Math.max(...s("pop"))} vs ${d.pop}`);
+    }
+    assert.ok(Math.abs(Math.max(...s("uv")) - d.uv) < 0.06, `${d.day} UV ${Math.max(...s("uv"))} vs ${d.uv}`);
+  });
+  // CWA's township forecast for about 3 days (wind 偏東風 = 90°, 3 m/s), then Open-Meteo (45°, 4 m/s)
+  assert.deepEqual([D.h.dir[13 + 24], D.h.wind[13 + 24], D.h.dir[200], D.h.wind[200]], [90, 3, 45, 4]);
+  assert.ok(D.h.gust.every((g, i) => g == null || D.h.wind[i] == null || g >= D.h.wind[i]), "a gust is never weaker than the wind");
+  // the coming hours lean toward the station: humidity now is the station's (70 %)
+  assert.equal(D.h.rh[13], 70);
+  // a sentence and a headline for every sheet, every day; air quality for 5 days
+  for (const d of D.days) for (const k of ["conditions", "rain", "wind", "feels", "humidity", "visibility", "pressure", "uv", "sun", "moon"]) {
+    assert.ok(d.text[k] && d.head[k], `${d.label} ${k}`);
+  }
+  assert.equal(D.air.days, 5);
+  assert.equal(D.days[0].text.air, "Up to 85 (moderate) around 15:00, mostly PM2.5.");
+  assert.match(D.days[0].text.conditions, /^High \d+° around 1[45]:00, low \d+° around 0\d:00\. Chance of rain up to \d+% around 1[4-6]:00\.$/);
+  // UV: the peak is CWA's (6, not Open-Meteo's 7.1); sun protection while it's 3 or more
+  assert.equal(D.days[0].text.uv, "Peaks at 6 (high) around 12:00. Use sun protection 08:00–17:00.");
+  assert.equal(D.days[0].text.sun, "Sunrise 05:45, sunset 17:41: 11 h 56 min of daylight, 1 min less than the day before. " +
+    "First light 05:22, last light 18:04."); // Taipei on 10-02
+  assert.deepEqual(D.warnings, [{ title: "陸上強風特報", text: "一、概述：陸上強風，請注意。\n\n二、注意事項",
+    meta: "until 10/02 23:00 · Issued 10/02 04:29", areas: "Areas：臺北市、新北市" }]);
+  fs.writeFileSync(path.join(E.stateDir, "app-detail.html"), html);
+  // 中文
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ lang: "zh" }));
+  await W.main();
+  const zh = detailOf(E.env.html);
+  scriptsCompile(E.env.html);
+  assert.equal(zh.days[0].label, "今天");
+  assert.equal(zh.days[0].text.air, "最高 85（普通，15:00 左右），主要來自PM2.5（細懸浮微粒）。");
+  assert.match(zh.days[0].text.wind, /^風速最大每秒 \d\.\d 公尺（\d 級，\d\d:00 左右），陣風每秒 \d+\.\d 公尺；多為(東|東北|東北東)風。$/);
+  fs.writeFileSync(path.join(E.stateDir, "app-detail-zh.html"), E.env.html);
+});
+
+await test("detail sheets: a forecast saved yesterday starts at today's hours; none without them", () => {
+  const r = { ...JSON.parse(fs.readFileSync(E.stateFile, "utf8")).lastResult };
+  W.setLang("en");
+  E.clock.now = E.tw("2026-10-03T09:10");
+  const D = W.detailPage({ ...r, days: r.days.filter((d) => d.day >= "2026-10-03") });
+  assert.deepEqual([D.days[0].label, D.now, D.h.t[0]], ["Today", 9, r.hours.t[24]]);
+  assert.equal(W.detailPage({ ...r, hours: null }), null);
+  E.clock.now = null;
+});
+
+await test("sun and moon: first light before sunrise; moonrise and moonset where the moon crosses the horizon", () => {
+  const taipei = { latitude: 25.033, longitude: 121.5654 };
+  const sun = W.sunTimes("2026-10-30", taipei), light = W.sunTimes("2026-10-30", taipei, -6);
+  assert.ok(sun.rise - light.rise > 20 && sun.rise - light.rise < 26 && light.set - sun.set > 20, JSON.stringify([sun, light]));
+  // the sun's height: about 52° at noon on 10-30 in Taipei, below the horizon at night
+  assert.ok(Math.abs(W.sunElevation(E.tw("2026-10-30T11:50"), 25.033, 121.5654) - 52) < 1.5);
+  assert.ok(W.sunElevation(E.tw("2026-10-30T23:00"), 25.033, 121.5654) < -30);
+  // moonrise and moonset in Taipei as timeanddate.com gives them (November 2026), within 2 minutes; none when the
+  // moon doesn't rise (11-02) or set (11-18) that day
+  const mins = (s) => (s ? Number(s.slice(0, 2)) * 60 + Number(s.slice(3)) : null);
+  const almanac = [["2026-11-01", "23:07", "12:06"], ["2026-11-02", null, "12:49"], ["2026-11-09", "05:53", "16:51"],
+    ["2026-11-18", "12:44", null], ["2026-11-24", "16:31", "05:38"], ["2026-11-27", "19:46", "09:03"]];
+  for (const [day, rise, set] of almanac) {
+    const m = W.moonTimes(day, { latitude: 25.0478, longitude: 121.5319 });
+    for (const [ours, theirs] of [[m.rise, mins(rise)], [m.set, mins(set)]]) {
+      assert.ok(theirs == null ? ours == null : Math.abs(ours - theirs) <= 2, `${day}: ${JSON.stringify(m)} vs ${rise}/${set}`);
+    }
+  }
+  // the phase from where the moon is (timeanddate: 80.3 % lit, new moon 11-09 15:02, full moon 11-24 22:53)
+  const phase = W.moonPhase(new Date(Date.parse("2026-10-30T08:56:31+08:00")));
+  assert.ok(phase.name === "Waning Gibbous" && Math.abs(phase.lit - 0.803) < 0.01, JSON.stringify(phase));
+  assert.ok(Math.abs(phase.nextNew - Date.parse("2026-11-09T15:02+08:00")) < 30 * 60e3, String(phase.nextNew));
+  assert.ok(Math.abs(phase.nextFull - Date.parse("2026-11-24T22:53+08:00")) < 30 * 60e3, String(phase.nextFull));
+  assert.deepEqual([W.windDegrees("偏東風"), W.windDegrees("東北風"), W.windDegrees("西南西風"), W.windDegrees("靜風")], [90, 45, 247.5, null]);
 });
 
 await test("ten days: later days average CWA's week and Open-Meteo, with CWA counting double", () => {
@@ -1209,6 +1312,19 @@ if (process.env.OFFLINE) {
       assert.ok(r.frames && r.frames.frames.length >= 6, "RainViewer radar frames: " + JSON.stringify(r.frames).slice(0, 200));
       assert.deepEqual(Object.keys(r.rainFrames).sort(), ["RCLY", "RCNT", "RCSL"]);
       assert.equal(nhConfig(E.env.html).cwaRadars[0].name, "樹林");
+      // the detail sheets: ten days of hours with every series filled from today on, and 5 days of air quality
+      const D = detailOf(E.env.html), now = D.now;
+      scriptsCompile(E.env.html);
+      assert.equal(D.h.t.length, 240);
+      for (const f of ["t", "pop", "rain", "feels", "rh", "dew", "wind", "dir", "gust", "pres", "vis", "uv"]) {
+        const missing = D.h[f].slice(now).filter((v) => v == null).length;
+        assert.ok(missing <= 2, `${f}: ${missing} hours from now on have no value`);
+      }
+      assert.ok(D.air && D.air.days >= 4 && D.air.main.some(Boolean), "air quality by the hour, with its main pollutant");
+      const cwaFeels = rawResponse("F-D0047-061").records.Locations[0].Location[0].WeatherElement.map((e) => e.ElementName);
+      assert.deepEqual(["體感溫度", "相對濕度", "露點溫度", "風速", "風向"].filter((n) => !cwaFeels.includes(n)), [], "CWA's extra elements");
+      console.log(`   detail: today ${D.days[0].text.conditions} | ${D.days[0].text.wind} | ${D.days[0].text.air || "no air"}`);
+      console.log(`   moon: ${D.days[0].text.moon}`);
       assert.deepEqual(r.errors, []);
       assert.ok(r.days.length === 10 && r.days.every((d) => d.hi >= d.lo && d.wx), JSON.stringify(r.days.slice(0, 3)));
       const week = rawResponse("F-D0047-063").records.Locations[0].Location[0];
@@ -1232,6 +1348,12 @@ if (process.env.OFFLINE) {
       assert.deepEqual(r.errors, []);
       assert.ok(r.place === "花蓮縣花蓮市" && r.sources.includes("cwa") && r.station && r.station.distance < 5, JSON.stringify(r.station));
       console.log(`   ${r.place}: now ${r.station.t}° at ${r.station.name} (${r.station.distance.toFixed(1)} km), H/L ${Math.round(r.summary.hi)}/${Math.round(r.summary.lo)}`);
+    });
+    await test("live CWA: the full texts of the warnings in force, with their areas", async () => {
+      const texts = await W.fetchWarningTexts(realKey);
+      assert.ok(Array.isArray(texts));
+      for (const t of texts) assert.ok(t.title && t.title.endsWith("報") && t.text.length > 20 && t.areas.length, JSON.stringify(t).slice(0, 300));
+      console.log(`   ${texts.length} warning(s): ${texts.map((t) => `${t.title} (${t.areas.join("、")})`).join("; ") || "none in force"}`);
     });
     await test("live CWA: the 降雨雷達 images are where the script expects", async () => {
       for (const radar of W.RAIN_RADARS) {

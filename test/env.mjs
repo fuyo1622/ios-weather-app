@@ -94,7 +94,7 @@ export function stationsFixture(ms, ids) {
 }
 
 // net.unknownTowns: township names this fixture's CWA "doesn't know" (a LocationName filter returns none).
-export function forecastFixture(ms, townName) {
+export function forecastFixture(ms, townName, names = null) {
   const start = floorHours(ms, 3); // CWA issues 3-hour steps
   const steps = Array.from({ length: 25 }, (_, i) => start + i * 3 * HOUR);
   const wet = (t) => [1, 2, 3].some((h) => world.rain(t + h * HOUR) > 0); // block [t, t+3h)
@@ -106,7 +106,13 @@ export function forecastFixture(ms, townName) {
         ({ StartTime: iso(t), EndTime: iso(t + 3 * HOUR), ElementValue: [{ ProbabilityOfPrecipitation: wet(t) ? "70" : "10" }] })) },
       { ElementName: "天氣現象", Time: steps.slice(0, 24).map((t) =>
         ({ StartTime: iso(t), EndTime: iso(t + 3 * HOUR), ElementValue: [{ Weather: wet(t) ? "陰短暫雨" : "多雲", WeatherCode: wet(t) ? "11" : "04" }] })) },
-    ] });
+      // the detail sheets' elements: instants every 3 hours
+      ...[["體感溫度", (t) => ({ ApparentTemperature: String(Math.round(world.temp(t) + 2)) })],
+        ["相對濕度", (t) => ({ RelativeHumidity: wet(t) ? "92" : "72" })],
+        ["露點溫度", (t) => ({ DewPoint: String(Math.round(world.temp(t) - 5)) })],
+        ["風速", () => ({ WindSpeed: "3", BeaufortScale: "2" })], ["風向", () => ({ WindDirection: "偏東風" })]]
+        .map(([name, value]) => ({ ElementName: name, Time: steps.map((t) => ({ DataTime: iso(t), ElementValue: [value(t)] })) })),
+    ].filter((el) => !names || names.split(",").includes(el.ElementName)) });
   const county = [town("大安區", 25.0282, 121.5264), town("信義區", 25.0351, 121.5587), town("大同區", 25.0680, 121.5072)];
   const known = county.filter((t) => !net.unknownTowns.includes(t.LocationName));
   const towns = townName == null ? known : net.unknownTowns.includes(townName) ? [] : [town(townName, 25.03, 121.56)];
@@ -139,6 +145,14 @@ export function warningsFixture(county) {
       validTime: { startTime: "2026-10-01 00:00:00", endTime: w.end } })) } }] } };
 }
 
+// The full texts of the warnings in net.warnings (W-C0033-002), all of Taiwan.
+export const warningTextsFixture = () => ({ success: "true", records: { record: net.warnings.map((w) => ({
+  datasetInfo: { datasetDescription: w.phenomena + w.significance, validTime: { startTime: "2026-10-01 00:00:00", endTime: w.end },
+    issueTime: "2026-10-02 04:29:00" },
+  contents: { content: { contentLanguage: "zh-TW", contentText: "\n      一、概述：" + w.phenomena + "，請注意。\n\n      二、注意事項\n      " } },
+  hazardConditions: { hazards: { hazard: [{ info: { phenomena: w.phenomena, significance: w.significance,
+    affectedAreas: { location: [{ locationName: "臺北市" }, { locationName: "新北市" }] } } }] } } })) } });
+
 export const radarFixture = () => ({ cwaopendata: { dataid: "O-A0058-006", dataset: {
   datasetInfo: { parameterSet: { LongitudeRange: "118.0-124.0", LatitudeRange: "20.5-26.5", ImageDimension: "3600x3600" } },
   resource: { mimeType: "image/png", ProductURL: "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-A0058-006.png" },
@@ -154,7 +168,13 @@ export function extrasFixture(ms) {
     current: { time: hk(ms) + ":00", apparent_temperature: round1(world.temp(ms) + 2), relative_humidity_2m: 75,
       wind_speed_10m: 3.2, wind_direction_10m: 70, wind_gusts_10m: 7.5, pressure_msl: 1013.2, visibility: 24140, uv_index: 4.5 },
     hourly: { time: hours.map((t) => hk(t) + ":00"), pressure_msl: hours.map((t, i) => 1012 + i * 0.1),
-      wind_gusts_10m: hours.map((t, i) => (i === 30 ? 12.4 : 6)) },
+      wind_gusts_10m: hours.map((t, i) => (i === 30 ? 12.4 : 6)),
+      temperature_2m: hours.map((t) => round1(world.temp(t) + 0.4)), apparent_temperature: hours.map((t) => round1(world.temp(t) + 2.5)),
+      relative_humidity_2m: hours.map((t) => (world.rain(t + HOUR) > 0 ? 95 : 70)), dew_point_2m: hours.map((t) => round1(world.temp(t) - 6)),
+      precipitation_probability: hours.map((t) => (world.rain(t + HOUR) > 0 ? 70 : 10)), precipitation: hours.map((t) => world.rain(t + HOUR)),
+      weather_code: hours.map((t) => (world.rain(t + HOUR) > 0 ? 61 : 2)), visibility: hours.map((t) => (world.rain(t + HOUR) > 0 ? 8000 : 24000)),
+      wind_speed_10m: hours.map(() => 4), wind_direction_10m: hours.map(() => 45),
+      uv_index: hours.map((t) => { const h = (t / HOUR + 8) % 24; return h >= 6 && h <= 18 ? round1(8 * Math.sin(((h - 6) / 12) * Math.PI)) : 0; }) },
     daily: { time: days.map((t) => hk(t).slice(0, 10)), weather_code: days.map((t, i) => [3, 61, 2, 0, 80, 95, 3, 1, 45, 71][i]),
       temperature_2m_max: days.map((t) => round1(Math.max(...dayTemps(t)))), temperature_2m_min: days.map((t) => round1(Math.min(...dayTemps(t)))),
       precipitation_probability_max: days.map((t, i) => [10, 80, 20, 0, 60, 70, 10, 5, 30, 40][i]), uv_index_max: days.map(() => 7.1) },
@@ -166,7 +186,15 @@ export function rainviewerFixture() {
   return { version: "2.0", host: "https://tilecache.rainviewer.com", radar: { nowcast: [],
     past: Array.from({ length: 13 }, (_, i) => ({ time: last - (12 - i) * 600, path: "/v2/radar/" + (last - (12 - i) * 600) })) } };
 }
-export const airFixture = () => ({ current: { time: hk(clock.ms()) + ":00", us_aqi: 55, pm2_5: 13, pm10: 18.6 } });
+export function airFixture() {
+  const start = floorHours(clock.ms(), 24), hours = Array.from({ length: 120 }, (_, i) => start + i * HOUR);
+  const aqi = (i) => 40 + (i % 24 === 15 ? 45 : (i % 24) * 1.5); // worst at 15:00
+  return { current: { time: hk(clock.ms()) + ":00", us_aqi: 55, pm2_5: 13, pm10: 18.6 },
+    hourly: { time: hours.map((t) => hk(t) + ":00"), us_aqi: hours.map((t, i) => aqi(i)), pm2_5: hours.map((t, i) => aqi(i) / 4),
+      pm10: hours.map(() => 20), ozone: hours.map(() => 90), nitrogen_dioxide: hours.map(() => 12), sulphur_dioxide: hours.map(() => 3),
+      carbon_monoxide: hours.map(() => 210), us_aqi_pm2_5: hours.map((t, i) => aqi(i)), us_aqi_pm10: hours.map(() => 18),
+      us_aqi_ozone: hours.map(() => 30), us_aqi_nitrogen_dioxide: hours.map(() => 10) } };
+}
 // The list of 降雨雷達 images CWA's website animates (Observe_radar_rain.js): for each radar (Area0 樹林 RCSL,
 // Area1 南屯 RCNT, Area2 林園 RCLY), 3600 px (size0) and 1000 px (size1) images, newest first, every 2 minutes or
 // so for the last 2 hours. net.rainRadarGap: a stretch of minutes ago with no images ([from, to]).
@@ -259,10 +287,11 @@ class Request {
         const q = new URL(this.url).searchParams, dataset = Number((this.url.match(/F-D0047-(\d+)/) || [])[1]);
         if (this.url.includes("O-A0001-001")) return stationsFixture(clock.ms(), q.get("StationId") && q.get("StationId").split(","));
         if (this.url.includes("W-C0033-001")) return warningsFixture(q.get("locationName"));
+        if (this.url.includes("W-C0033-002")) return warningTextsFixture();
         if (this.url.includes("O-A0058-006")) return radarFixture();
         if (this.url.includes("O-A0084-")) return { cwaopendata: { dataset: { DateTime: iso(clock.ms()).replace(":00:00+", ":08:00+") } } };
         if (dataset % 4 === 3) return weekFixture(clock.ms(), q.get("LocationName")); // 1-week sets: 003, 007, … 063
-        return forecastFixture(clock.ms(), q.get("LocationName"));
+        return forecastFixture(clock.ms(), q.get("LocationName"), q.get("ElementName"));
       }
     } else if (this.url.includes("rainviewer.com")) {
       if (net.rainviewer === "down") throw new Error("The request timed out.");
@@ -402,7 +431,8 @@ export async function loadScript() {
     " nearestStation, nearestTown, TOWN_POINTS, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
     " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook, findPlace, setLang, WORDS," +
     " nowcastFrom, rainRadarPixel, RAIN_RADARS, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
-    " placeholderHTML, fetchRainRadarFrames, pickFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence };";
+    " placeholderHTML, fetchRainRadarFrames, pickFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence, detailHours, detailPage, moonTimes, moonAltitude," +
+    " sunElevation, windDegrees, fetchWarningTexts, fetchAir, fetchExtras };";
   const factory = new AsyncFunction(...Object.keys(globals), src + exportsLine);
   return factory(...Object.values(globals));
 }
