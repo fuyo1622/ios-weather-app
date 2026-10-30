@@ -678,6 +678,8 @@ await test("detail sheets: every card and tile opens one; ten days of hours, agr
     assert.ok(html.includes(`data-detail="${kind}"`), kind);
   }
   assert.ok(html.includes('<div class="sheet" id="detail" hidden>') && html.includes('id="map-full"'));
+  // the radar's full screen has its own ✕ back, placed where the page's top starts (below the status bar)
+  assert.ok(html.includes('id="map-back"') && html.includes(".radar.full .unfull { display: block; position: fixed; top: max(10px, env(safe-area-inset-top));"));
   // the hours: today 00:00 to the tenth day's 23:00, every series as long
   assert.equal(r.hours.start, "2026-10-02T00");
   assert.deepEqual([D.days.length, D.now, D.h.t.length], [10, 13, 240]);

@@ -69,7 +69,11 @@ scrolled, when the new one is in:
   Air quality has 5 days by the hour with each pollutant; Sunrise and sunset the sun's path, first and last light
   and the daylight; the Moon its phase, moonrise and moonset (within about 2 minutes of almanacs), the next full and
   new moons and a 4-week calendar; Next hour a larger chart and a jump to the 降雨雷達; a warning CWA's full text
-  and the areas it covers. The radar card has a full-screen button (⤢).
+  and the areas it covers. The radar card has a full-screen button; in full screen a ✕ at the top right, where the
+  page's own top begins, brings it back.
+
+Scriptable always shows its own bar (with Close) above a page it presents; its API has no way to hide it
+(`WebView.present` only takes `fullscreen`, which the full view already uses), so the page's own buttons sit below it.
   Where the hours come from, best first: CWA wherever it forecasts them, i.e. today and tomorrow from the blend
   above, and feels-like, humidity, dew point and wind from its township forecast for about 3 days (the next hours
   lean toward the station's reading); then Open-Meteo (later days, rain amounts, gusts, pressure, visibility, UV).

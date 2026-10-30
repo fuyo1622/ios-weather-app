@@ -1944,7 +1944,11 @@ function detailHTML(r, ui = {}) {
     url: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/${s.id}.png`,
     time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16) })).sort((a, b) => a.km - b.km) : [];
   const radar = mapSource && r.loc ? card(`🛰️ ${w.radar}`,
-    `<button type="button" class="expand" id="map-full" aria-label="${w.d.full}">⤢</button>` +
+    // full screen (its icon drawn here rather than a font's arrow, so it shows the same everywhere), and back
+    `<button type="button" class="expand" id="map-full" aria-label="${w.d.full}"><svg viewBox="0 0 20 20" width="16" height="16" ` +
+    `aria-hidden="true"><path d="M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5" fill="none" stroke="currentColor" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="unfull" id="map-back" ` +
+    `aria-label="${w.d.close}">✕</button>` +
     `<div class="tabs"><button type="button" class="on" data-tab="move">${w.radarTabs[0]}</button>` +
     `<button type="button" data-tab="cwa">${w.radarTabs[1]}</button></div><div id="map"></div>` +
     `<div id="cwa-view" hidden><div class="tabs" id="stations">${rainRadars.map((s, i) =>
@@ -2074,9 +2078,16 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
 .nh-axis { display: flex; justify-content: space-between; margin: 4px 0 0; font-size: 12px; color: var(--dim); }
 [data-detail] { cursor: pointer; -webkit-tap-highlight-color: rgba(255, 255, 255, .08); }
 .radar { position: relative; } .expand { position: absolute; top: 8px; right: 10px; z-index: 5; color: #fff; border: 0;
-  font: 15px -apple-system, system-ui, sans-serif; background: rgba(0, 0, 0, .25); border-radius: 10px; padding: 2px 8px; }
+  background: rgba(0, 0, 0, .25); border-radius: 10px; padding: 3px 8px 1px; } .unfull { display: none; }
+/* full screen: no blur (it would hold the close button inside the card), the close button where the page's own
+   top starts (below the status bar and anything above the page), clear of the tabs */
 .radar.full { position: fixed; inset: 0; z-index: 2600; border-radius: 0; overflow-y: auto; background: #1d2a40;
-  padding-top: max(14px, env(safe-area-inset-top)); } .radar.full #map, .radar.full #cwa-map { height: calc(100vh - 170px); }
+  -webkit-backdrop-filter: none; backdrop-filter: none; padding-top: max(14px, env(safe-area-inset-top)); }
+.radar.full #map, .radar.full #cwa-map { height: calc(100vh - 190px); } .radar.full .expand { display: none; }
+.radar.full > h2, .radar.full .tabs { padding-right: 56px; }
+.radar.full .unfull { display: block; position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 2700;
+  width: 40px; height: 40px; border: 0; border-radius: 20px; color: #fff; background: rgba(255, 255, 255, .22);
+  font: 20px -apple-system, system-ui, sans-serif; }
 #detail { padding: max(28px, env(safe-area-inset-top)) 10px 10px; }
 .sheet .detail { display: block; max-height: none; height: 100%; box-sizing: border-box; overflow-y: auto; }
 .d-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
@@ -2264,11 +2275,13 @@ if (window.L) {
     L.imageOverlay(cwa.url + "?t=" + Date.now(), cwa.bounds, { opacity: 0.8 }).addTo(map);
   }
   L.circleMarker(here, { radius: 6, color: "#fff", weight: 2, fillColor: "#0a84ff", fillOpacity: 1 }).addTo(map);
-  // ⤢: the radar card fills the screen (again to go back)
-  document.getElementById("map-full").addEventListener("click", () => {
-    document.querySelector(".radar").classList.toggle("full");
+  // the radar card fills the screen, and ✕ brings it back
+  const fullScreen = (on) => {
+    document.querySelector(".radar").classList.toggle("full", on);
     setTimeout(() => { map.invalidateSize(); if (cwaMap) cwaMap.invalidateSize(); }, 60);
-  });
+  };
+  document.getElementById("map-full").addEventListener("click", () => fullScreen(true));
+  document.getElementById("map-back").addEventListener("click", () => fullScreen(false));
 
   // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it.
   let cwaMap = null;
