@@ -134,9 +134,14 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
 - `SURVEY.md`: background research.
 
 ## Toward the iPhone Weather app
-Done: hourly and ten-day forecasts, the detail tiles, air quality, CWA warnings, an animated radar map and CWA's
-降雨雷達, next-hour rain timing, sunrise/sunset and moon, saved places with swiping, English / 中文, and notifications.
+Done: hourly and ten-day forecasts, the detail tiles and a detail sheet behind every card, air quality, CWA warnings,
+an animated radar map and CWA's 降雨雷達, next-hour rain timing, sunrise/sunset, moonrise/moonset and phases, saved
+places with swiping, English / 中文, and notifications.
 Next, roughly in order:
 - Taiwan's official air-quality stations (環境部, needs a free API key) instead of the model estimate.
-- Moonrise/moonset, and today's high/low against the normal for the date.
+- Today's high/low against the normal for the date.
 - Verify humidity, wind and rain amount, not only temperature and rain chance.
+
+## License
+MIT, see [LICENSE](LICENSE). The weather data, map and radar images belong to their providers (CWA, Open-Meteo,
+OpenStreetMap, RainViewer) and are credited in the app; each user needs their own free CWA API key.
