@@ -42,7 +42,7 @@ otherwise "Rain likely 60%" or "Rain chance 30%". The "Rain soon" notification w
 the hourly card follows the radar for the coming hour (see Next hour below).
 
 **Your township** comes from Apple's geocoder when its names match CWA's, else from the nearest of CWA's 368
-township forecast points; the in-app view says which. Learning data stays on the phone (not iCloud).
+township forecast points, until the geocoder answers on a later refresh; the in-app view says which. Learning data stays on the phone (not iCloud).
 **Data use:** about 5 KB per widget refresh, plus CWA's full station list (~75 KB) once a week. Opening the full view
 adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour.
 

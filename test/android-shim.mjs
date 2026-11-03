@@ -144,3 +144,4 @@ await test("widgets: in 中文, as the app's language is", async () => {
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
+setTimeout(() => process.exit(), 1000).unref(); // a failed test may leave a page's timer running: end anyway

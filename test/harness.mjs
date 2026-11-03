@@ -462,6 +462,7 @@ await test("township: the nearest township centre, or Apple's answer when its na
 
 await test("township lookup is reused while within 1 km, and redone after moving", async () => {
   reset({ at: E.tw("2026-10-02T15:10") });
+  E.env.geocode = (latitude) => [{ administrativeArea: "臺北市", subLocality: latitude > 25.05 ? "中山區" : "信義區" }];
   await W.run("KEY");
   E.env.location = { latitude: E.HOME.latitude + 0.003, longitude: E.HOME.longitude }; // ~330 m away
   await W.run("KEY");
@@ -469,7 +470,20 @@ await test("township lookup is reused while within 1 km, and redone after moving
   E.env.location = { latitude: 25.0663, longitude: 121.5253 }; // 中山區, ~4.5 km away
   const r = await W.run("KEY");
   assert.equal(E.env.geocodeCalls, 2);
-  assert.equal(r.place, "臺北市中山區");
+  assert.deepEqual([r.place, r.placeVia], ["臺北市中山區", "apple"]);
+});
+
+await test("township: after no answer from Apple's geocoder, the next run asks again (the nearest centre isn't kept)", async () => {
+  const border = { latitude: 25.0675, longitude: 121.512 }; // in 中山區, but nearer 大同區's centre
+  reset({ at: E.tw("2026-10-02T15:10") });
+  Object.assign(E.env, { location: border, geocode: () => { throw new Error("The request timed out."); } });
+  let r = await W.run("KEY");
+  assert.deepEqual([r.place, r.placeVia], ["臺北市大同區", "nearest"]);
+  E.env.geocode = () => [{ name: "南京西路", administrativeArea: "台北市", locality: "台北市", subLocality: "中山區" }];
+  r = await W.run("KEY");
+  assert.deepEqual([r.place, r.placeVia, E.env.geocodeCalls], ["臺北市中山區", "apple", 2]);
+  r = await W.run("KEY"); // Apple's answer is then kept within 1 km
+  assert.deepEqual([r.place, E.env.geocodeCalls], ["臺北市中山區", 2]);
 });
 
 await test("township forecast: one township by name, the whole county only if CWA doesn't know it", async () => {
@@ -1134,13 +1148,16 @@ await test("refresh: widgets ask for a new forecast after 10 minutes; the open p
   E.setConfig({ runsInApp: true });
   E.env.keepOpen = true; // the page stays open until env.close()
   const opened = W.main();
-  await waitFor(() => E.env.close && E.env.pages.length >= 2);
-  E.env.pages.length = 0;
-  E.clock.now = E.tw("2026-10-02T13:40"); // the forecast is now 20 minutes old
-  await waitFor(() => E.env.pages.length >= 1);
-  assert.ok(E.env.pages[0].includes("Updated 13:40"), E.env.pages[0].match(/Updated [^<]*/)?.[0]);
-  E.env.close();
-  await opened;
+  try {
+    await waitFor(() => E.env.close && E.env.pages.length >= 2);
+    E.env.pages.length = 0;
+    E.clock.now = E.tw("2026-10-02T13:40"); // the forecast is now 20 minutes old
+    await waitFor(() => E.env.pages.length >= 1);
+    const local = new Date(E.clock.now).toTimeString().slice(0, 5); // 13:40 on a phone in Taiwan
+    assert.ok(E.env.pages[0].includes("Updated " + local), E.env.pages[0].match(/Updated [^<]*/)?.[0]);
+  } finally {
+    if (E.env.close) { E.env.close(); await opened; } // (the page's timer would keep the tests running)
+  }
 });
 
 await test("places in one session share the radar, warnings, station list and 降雨雷達 list downloads", async () => {
@@ -1414,3 +1431,4 @@ if (process.env.OFFLINE) {
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
+setTimeout(() => process.exit(), 1000).unref(); // a failed test may leave a page's timer running: end anyway

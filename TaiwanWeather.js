@@ -404,10 +404,11 @@ function nearestTown(loc) {
 }
 
 // The CWA township at loc. Apple's geocoder knows the real borders, so its answer wins when its names
-// match a CWA township; otherwise the nearest township centre. Reused while within 1 km.
+// match a CWA township; otherwise the nearest township centre. Apple's answer is reused while within 1 km; after
+// no answer (a slow or offline geocoder), the next run asks again rather than keep the nearest centre.
 async function findTown(loc, state) {
   const last = state.place;
-  if (last && distanceKm(loc, last) < 1) return last;
+  if (last && last.via === "apple" && distanceKm(loc, last) < 1) return last;
   let match = null;
   try {
     const names = ((await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [])

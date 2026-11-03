@@ -26,8 +26,10 @@ import java.util.concurrent.TimeUnit
 object Refresh {
     private val online = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
+    // the first in 15 minutes: on a new phone the app's own run comes first (with the key from its dialog)
     fun schedule(context: Context) = WorkManager.getInstance(context).enqueueUniquePeriodicWork("refresh",
-        ExistingPeriodicWorkPolicy.KEEP, PeriodicWorkRequestBuilder<RefreshWorker>(15, TimeUnit.MINUTES).setConstraints(online).build())
+        ExistingPeriodicWorkPolicy.KEEP, PeriodicWorkRequestBuilder<RefreshWorker>(15, TimeUnit.MINUTES)
+            .setInitialDelay(15, TimeUnit.MINUTES).setConstraints(online).build())
 
     fun now(context: Context) = WorkManager.getInstance(context).enqueueUniqueWork("refresh-now",
         ExistingWorkPolicy.REPLACE, OneTimeWorkRequestBuilder<RefreshWorker>().setConstraints(online).build())
