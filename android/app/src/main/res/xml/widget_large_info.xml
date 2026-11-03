@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The large widget: 4×4 cells; refreshed by Refresh.kt (WorkManager), not by Android's own timer. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:configure="com.fuyo1622.taiwanweather.WidgetConfigActivity"
+    android:description="@string/widget_large_about"
+    android:initialLayout="@layout/widget_large"
+    android:minWidth="250dp"
+    android:minHeight="250dp"
+    android:previewLayout="@layout/widget_large"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellWidth="4"
+    android:targetCellHeight="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    android:widgetFeatures="reconfigurable|configuration_optional" />

@@ -1,0 +1,106 @@
+# The Android app: test the shared script and the Android shim, build the APKs, run the test build on an Android
+# emulator (screenshots in the "emulator" artifact), then publish the signed APK as the "android-latest" release.
+name: Android
+
+on:
+  push:
+    branches: [android, main]
+    paths: ["android/**", "TaiwanWeather.js", "test/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # to publish the release
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Taipei # the phones' clock: times on the page and widgets are local
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Script and Android shim tests (fixtures)
+        run: OFFLINE=1 node test/harness.mjs && node test/android-shim.mjs
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - name: Signing key (from the repository's secrets)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: gradle -p android assembleDebug assembleRelease --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: android/app/build/outputs/apk/**/*.apk
+
+  emulator:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: apks
+          path: apks
+      - name: Let the emulator use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Emulator test (Android 14)
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CWA_KEY: ${{ secrets.CWA_KEY }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash android/ci/smoke.sh apks/debug/app-debug.apk shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator
+          path: shots
+
+  release:
+    needs: emulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: apks
+          path: apks
+      - name: Publish the APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp apks/release/app-release.apk TaiwanWeather.apk
+          gh release delete android-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create android-latest TaiwanWeather.apk --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "Android test build ${GITHUB_RUN_NUMBER}" \
+            --notes "Taiwan Weather for Android, built from ${GITHUB_SHA::7} (branch ${GITHUB_REF_NAME}). On an Android phone (Android 8 or later): open this page, download TaiwanWeather.apk, and allow installing from this source when asked. Each new build installs over the last one."

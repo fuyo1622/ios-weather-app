@@ -132,6 +132,28 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
   steps and a QR code), published as a private claude.ai artifact so the script can be installed without iCloud Drive.
   Rebuild and republish it whenever `TaiwanWeather.js` changes: `node tools/install-page.mjs <out.html> <page URL>`.
 - `SURVEY.md`: background research.
+- `android/`, `test/android-shim.mjs`, `.github/workflows/android.yml`: the Android app (below).
+
+## Android
+The same `TaiwanWeather.js` runs in an Android app (Android 8 or later): the full view with its detail sheets,
+home-screen widgets in three sizes (My Location or a saved place, chosen when the widget is added; a tap opens it),
+and the rain and warning notifications. Download `TaiwanWeather.apk` from the
+[android-latest release](https://github.com/fuyo1622/ios-weather-app/releases/tag/android-latest) on the phone and
+allow installing from that source; the first run asks for the CWA key, as on the iPhone.
+- **How it works:** the app runs the script in a WebView of its own, as Scriptable does, under `shim.js`: the
+  Scriptable API the script uses (requests, files, the key, location, notifications, dialogs, the page you see) on
+  top of a small Android bridge (`Bridge.kt`). The page is loaded as a page of CWA's site, as on the iPhone, so the
+  next-hour card can read the 降雨雷達. Android's back button first closes a sheet or the radar's full screen.
+- **Widgets** are Android's own layouts, filled from the same forecast and wording as the iPhone's (`widgetData` in
+  `shim.js`), refreshed every 15 minutes (Android's shortest) while online. Away from the app, My Location is the
+  last place the app saw: Android shares the location with apps in the background only with an extra permission.
+  Android has no lock-screen widgets.
+- **Built and tested on GitHub Actions** (nothing to install on a PC): the script's and the shim's tests, the APKs
+  (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101 with the CWA key from the
+  repository's secrets: the full view, a detail sheet, the back button, the radar and the widgets are photographed
+  (the "emulator" artifact of each run), and the run fails on any script error. The release APK is signed with a
+  key kept in the repository's secrets, so each build installs over the one before.
+- `node test/android-shim.mjs` runs the shim's tests locally.
 
 ## Toward the iPhone Weather app
 Done: hourly and ten-day forecasts, the detail tiles and a detail sheet behind every card, air quality, CWA warnings,

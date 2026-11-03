@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test builds only: hooks for the emulator tests (android/ci/smoke.sh). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver android:name=".DebugReceiver" android:exported="true" />
+        <activity android:name=".WidgetPreviewActivity" android:exported="true" />
+    </application>
+</manifest>

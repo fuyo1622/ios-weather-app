@@ -1,3 +1,12 @@
 test/.state/
 node_modules/
 .env
+
+# Android builds, and signing keys (they live in GitHub's secrets, never here)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+*.p12
+*.keystore

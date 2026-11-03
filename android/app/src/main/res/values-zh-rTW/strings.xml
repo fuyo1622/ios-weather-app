@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">臺灣天氣</string>
+    <string name="my_location">目前位置</string>
+    <string name="loading">載入中…</string>
+    <string name="choose_place">這個小工具顯示</string>
+    <string name="channel_name">降雨與天氣特報</string>
+    <string name="widget_small">現在</string>
+    <string name="widget_medium">未來幾小時</string>
+    <string name="widget_large">今天與明天</string>
+    <string name="widget_small_about">現在、今天的最高與最低溫，以及下次下雨</string>
+    <string name="widget_medium_about">現在與未來 16 小時</string>
+    <string name="widget_large_about">現在、未來 24 小時與明天</string>
+</resources>

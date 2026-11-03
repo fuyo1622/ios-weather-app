@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app: dark, as the full view's page; the page draws its own sky. -->
+    <style name="Theme.TaiwanWeather" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/page_bg</item>
+        <item name="android:statusBarColor">@color/widget_top</item>
+        <item name="android:navigationBarColor">@color/widget_bottom</item>
+        <item name="android:colorAccent">@color/rain</item>
+    </style>
+    <style name="Theme.TaiwanWeather.Dialog" parent="android:Theme.Material.Dialog">
+        <item name="android:colorAccent">@color/rain</item>
+    </style>
+
+    <!-- Widget text, as on the iPhone widgets: white, one line each. -->
+    <style name="WidgetText">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">#FFFFFFFF</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:ellipsize">end</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+    <style name="WidgetText.Dim"><item name="android:textColor">#A6FFFFFF</item></style>
+    <style name="WidgetText.Rain"><item name="android:textColor">@color/rain</item></style>
+    <style name="WidgetText.Big">
+        <item name="android:textSize">34sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+</resources>

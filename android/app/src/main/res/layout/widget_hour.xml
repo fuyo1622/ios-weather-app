@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One hour in a widget's row: the hour, its weather, temperature and chance of rain. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="0dp"
+    android:layout_height="wrap_content"
+    android:layout_weight="1"
+    android:gravity="center_horizontal"
+    android:orientation="vertical">
+
+    <TextView android:id="@+id/hour" style="@style/WidgetText.Dim" android:layout_width="wrap_content" android:textSize="10sp" />
+
+    <TextView android:id="@+id/hour_icon" style="@style/WidgetText" android:layout_width="wrap_content" android:textSize="13sp" />
+
+    <TextView android:id="@+id/hour_temp" style="@style/WidgetText" android:layout_width="wrap_content" android:textSize="12sp" android:textStyle="bold" />
+
+    <TextView android:id="@+id/hour_pop" style="@style/WidgetText.Rain" android:layout_width="wrap_content" android:textSize="9sp" />
+</LinearLayout>

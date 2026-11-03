@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App icon: the sun behind a cloud, inside the adaptive icon's 66 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/sun"
+        android:pathData="M44,46m-15,0a15,15 0,1 1,30 0a15,15 0,1 1,-30 0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M40,78h33a10,10 0,0 0,1.5 -19.9A16,16 0,0 0,43.6 54.4,11.8 11.8,0 0,0 40,78z" />
+</vector>

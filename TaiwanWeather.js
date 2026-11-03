@@ -2222,6 +2222,13 @@ let touching = false;
 window.pageState = () => ({ y: Math.round(window.scrollY), busy: touching || !picker.hidden ||
   !!document.querySelector("#detail:not([hidden]), .radar.full") ||
   !!document.querySelector("#cwa-view:not([hidden])") || document.body.classList.contains("playing") });
+// Android's back button: closes what's open on the page (a sheet, the radar's full screen); false if nothing was.
+window.__back = () => {
+  const sheet = document.querySelector("#detail:not([hidden]), #picker:not([hidden])");
+  if (sheet) { sheet.hidden = true; return true; }
+  if (document.querySelector(".radar.full")) { document.getElementById("map-back").click(); return true; }
+  return false;
+};
 ${ui.scrollY ? `window.scrollTo(0, ${Math.round(ui.scrollY)});` : ""}
 </script>
 ${radar ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>

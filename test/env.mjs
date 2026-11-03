@@ -12,7 +12,7 @@ export const HOUR = 3600e3;
 // ---------------- Clock (the script sees FakeDate as Date) ----------------
 const RealDate = Date;
 export const clock = { now: null, ms() { return this.now ?? RealDate.now(); } };
-class FakeDate extends RealDate {
+export class FakeDate extends RealDate {
   constructor(...a) { if (a.length) super(...a); else super(clock.ms()); }
   static now() { return clock.ms(); }
 }
@@ -306,6 +306,12 @@ class Request {
     const res = await fetch(this.url);
     return res.json();
   }
+}
+
+// A request's body as text, from the fixtures above (for the Android shim's tests, whose bridge answers in text).
+export async function fixtureText(url) {
+  const req = new Request(url);
+  return url.includes("www.cwa.gov.tw/") ? req.loadString() : JSON.stringify(await req.loadJSON());
 }
 
 const fileManager = {

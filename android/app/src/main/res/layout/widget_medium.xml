@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Medium widget: place and now on the left, weather, high/low and the rain line on the right, 8 hours (every 2)
+     below, then the bottom line. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:orientation="vertical"
+    android:paddingHorizontal="14dp"
+    android:paddingVertical="10dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView android:id="@+id/place" style="@style/WidgetText.Dim" android:textSize="12sp" />
+
+            <TextView android:id="@+id/temp" style="@style/WidgetText.Big" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <TextView android:id="@+id/icon" style="@style/WidgetText" android:layout_width="wrap_content" android:textSize="22sp" />
+
+            <TextView android:id="@+id/condition" style="@style/WidgetText.Dim" android:layout_width="wrap_content" android:textSize="12sp" />
+
+            <TextView android:id="@+id/rain" style="@style/WidgetText.Rain" android:layout_width="wrap_content" android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/hours"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
+        android:gravity="center_vertical"
+        android:orientation="horizontal" />
+
+    <TextView android:id="@+id/bottom" style="@style/WidgetText.Dim" android:textSize="9sp" />
+</LinearLayout>

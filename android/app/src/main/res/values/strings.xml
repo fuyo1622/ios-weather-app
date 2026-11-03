@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Taiwan Weather</string>
+    <string name="my_location">My Location</string>
+    <string name="loading">Loading…</string>
+    <string name="choose_place">Show in this widget</string>
+    <string name="channel_name">Rain and warnings</string>
+    <string name="widget_small">Now</string>
+    <string name="widget_medium">Next hours</string>
+    <string name="widget_large">Today and tomorrow</string>
+    <string name="widget_small_about">Now, today\'s high and low, and the next rain</string>
+    <string name="widget_medium_about">Now and the next 16 hours</string>
+    <string name="widget_large_about">Now, the next 24 hours and tomorrow</string>
+</resources>
