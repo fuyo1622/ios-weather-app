@@ -81,10 +81,6 @@ class MainActivity : ComponentActivity(), Engine.Host {
                 page.evaluateJavascript("window.__back ? __back() : false") { if (it != "true") finish() }
             }
         })
-        // test builds take a CWA key from the command that starts them (the emulator tests)
-        if (BuildConfig.DEBUG) intent.getStringExtra("cwaKey")?.let {
-            getSharedPreferences(Bridge.KEYCHAIN, MODE_PRIVATE).edit().putString("CWA_API_KEY", it).commit()
-        }
         val wanted = mutableListOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
         if (Build.VERSION.SDK_INT >= 33) wanted += Manifest.permission.POST_NOTIFICATIONS
         val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }

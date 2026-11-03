@@ -136,8 +136,8 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
 
 ## Android
 The same `TaiwanWeather.js` runs in an Android app (Android 8 or later): the full view with its detail sheets,
-home-screen widgets in three sizes (My Location or a saved place, chosen when the widget is added; a tap opens it),
-and the rain and warning notifications. Download `TaiwanWeather.apk` from the
+home-screen widgets in three sizes (My Location, or a saved place: asked when the widget is added on Android 8–11,
+and set by holding the widget on Android 12 and later; a tap opens it), and the rain and warning notifications. Download `TaiwanWeather.apk` from the
 [android-latest release](https://github.com/fuyo1622/ios-weather-app/releases/tag/android-latest) on the phone and
 allow installing from that source; the first run asks for the CWA key, as on the iPhone.
 - **How it works:** the app runs the script in a WebView of its own, as Scriptable does, under `shim.js`: the
@@ -149,10 +149,12 @@ allow installing from that source; the first run asks for the CWA key, as on the
   last place the app saw: Android shares the location with apps in the background only with an extra permission.
   Android has no lock-screen widgets.
 - **Built and tested on GitHub Actions** (nothing to install on a PC): the script's and the shim's tests, the APKs
-  (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101 with the CWA key from the
-  repository's secrets: the full view, a detail sheet, the back button, the radar and the widgets are photographed
-  (the "emulator" artifact of each run), and the run fails on any script error. The release APK is signed with a
-  key kept in the repository's secrets, so each build installs over the one before.
+  (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101, first run as on a new phone:
+  the CWA key (from the repository's secrets) typed into its dialog, then the full view, a detail sheet, the back
+  button, the radar, the 中文 link, the widgets and the test notifications, each photographed (the "emulator"
+  artifact of each run, never showing the key). The run fails on any script error, or if the key isn't kept, a link
+  or a notification doesn't work, or the widgets get no forecast. The release APK is signed with a key kept in the
+  repository's secrets, so each build installs over the one before.
 - `node test/android-shim.mjs` runs the shim's tests locally.
 
 ## Toward the iPhone Weather app

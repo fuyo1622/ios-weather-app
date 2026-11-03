@@ -97,8 +97,8 @@ object Widgets {
         return v
     }
 
-    private fun first(list: JSONArray, until: Int, from: Int = 0) = JSONArray().also { out ->
-        for (i in from until minOf(until, list.length())) out.put(list.get(i))
+    private fun first(list: JSONArray, end: Int, from: Int = 0) = JSONArray().also { out ->
+        for (i in from until minOf(end, list.length())) out.put(list.get(i))
     }
 
     // One column per hour: the hour, its weather, temperature and chance of rain.

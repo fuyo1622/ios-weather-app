@@ -17,7 +17,7 @@ object Notifications {
     fun show(context: Context, identifier: String, title: String, body: String) {
         if (Build.VERSION.SDK_INT >= 33 &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val nm = context.getSystemService(NotificationManager::class.java)
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
         nm.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.channel_name),
             NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(context, 0,

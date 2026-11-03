@@ -75,16 +75,19 @@ class Bridge(private val engine: Engine) {
         } catch (e: SocketTimeoutException) {
             engine.finish(id, false, "The request timed out.")
         } catch (e: Exception) {
-            engine.finish(id, false, e.message ?: e.javaClass.simpleName)
+            engine.finish(id, false, masked(e.message ?: e.javaClass.simpleName))
         }
     }
+
+    // An error can quote its URL, and CWA's URLs carry the key: the page and the logs show errors without it.
+    private fun masked(message: String) = message.replace(Regex("Authorization=[^&\\s]*"), "Authorization=…")
 
     /** Where the phone is: a fix under 10 minutes old at once, else a new one (the script gives up after 6 s). */
     @JavascriptInterface fun location(id: Int) = main.post {
         val granted = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
             .any { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
         if (!granted) return@post engine.finish(id, false, "Location access denied")
-        val lm = context.getSystemService(LocationManager::class.java)
+        val lm = context.getSystemService(LocationManager::class.java) ?: return@post engine.finish(id, false, "no location")
         val answer = { l: Location -> engine.finish(id, true, JSONObject().put("latitude", l.latitude).put("longitude", l.longitude).toString()) }
         try {
             val providers = lm.getProviders(true)
