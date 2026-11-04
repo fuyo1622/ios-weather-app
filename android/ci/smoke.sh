@@ -117,8 +117,15 @@ sleep 3
 shot 7-notification
 adb shell cmd statusbar collapse
 
-# Abroad (Tokyo): My Location's widget, then the app opened afresh, say it's outside Taiwan.
-adb emu geo fix 139.76 35.68
+# Abroad (Tokyo): My Location's widget, then the app opened afresh, say it's outside Taiwan. The phone moves through
+# Android's test location providers, so Tokyo is at once the newest fix the app can find (a GPS fix from the emulator
+# isn't, while the app still has one from Taipei under 10 minutes old; on a real trip that one is hours old).
+adb shell appops set com.android.shell android:mock_location allow || adb shell appops set com.android.shell MOCK_LOCATION allow || true
+for p in gps network fused; do
+  adb shell cmd location providers add-test-provider "$p" || true
+  adb shell cmd location providers set-test-provider-enabled "$p" true || true
+  adb shell cmd location providers set-test-provider-location "$p" --location 35.68,139.76 --accuracy 10 || true
+done
 sleep 3
 refreshed=$(count "widgets refreshed")
 adb shell am broadcast -n "$PKG/.DebugReceiver" -a REFRESH > /dev/null
