@@ -15,7 +15,12 @@ const lines = code.split("\n").length, kb = Math.round(Buffer.byteLength(code) /
 const version = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" }); // YYYY-MM-DD
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-const html = `<title>TaiwanWeather Script</title>
+const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TaiwanWeather Script</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@700&display=swap">
@@ -34,7 +39,7 @@ const html = `<title>TaiwanWeather Script</title>
 }
 :root[data-theme="dark"] { --bg: #0c1424; --surface: #131f37; --fg: #e6edf7; --muted: #9fb1c9;
   --line: #26385a; --accent: #7cc4ff; --accent-fg: #0c1424; --ok: #63d49d; --warn: #f0b456; color-scheme: dark; }
-body { background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body); }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body); }
 .wrap { max-width: 42rem; margin: 0 auto; padding-inline: 16px; padding-block: 28px 56px; display: grid; gap: 30px; }
 header { display: grid; gap: 4px; }
 .eyebrow { margin: 0; color: var(--muted); font-size: 13px; letter-spacing: .04em; }
@@ -60,6 +65,8 @@ textarea { width: 100%; box-sizing: border-box; height: 16em; resize: vertical; 
 #qr { background: #ffffff; padding: 10px; border-radius: 10px; line-height: 0; }
 .qr p { margin: 0; color: var(--muted); font-size: 14px; word-break: break-all; }
 </style>
+</head>
+<body>
 <main class="wrap">
   <header>
     <p class="eyebrow">Scriptable widget · 中央氣象署 + 7 models</p>
@@ -119,6 +126,8 @@ if (pageUrl && window.QRCode) {
   document.getElementById("qr-box").classList.add("ready");
 }
 </script>
+</body>
+</html>
 `;
 fs.writeFileSync(out, html);
 console.log(`wrote ${out}: ${lines} lines, ${kb} KB of script${pageUrl ? ", QR for " + pageUrl : ""}`);
