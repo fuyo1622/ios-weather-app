@@ -42,7 +42,11 @@ otherwise "Rain likely 60%" or "Rain chance 30%". The "Rain soon" notification w
 the hourly card follows the radar for the coming hour (see Next hour below).
 
 **Your township** comes from Apple's geocoder when its names match CWA's, else from the nearest of CWA's 368
-township forecast points, until the geocoder answers on a later refresh; the in-app view says which. Learning data stays on the phone (not iCloud).
+township forecast points, until the geocoder answers on a later refresh; the in-app view says which.
+**Outside Taiwan**, My Location shows no forecast: the full view and the widgets say so (saved places still show
+theirs), nothing is downloaded for it, and no notifications are sent. Far from Taiwan that needs no network; near
+Kinmen and Matsu the geocoder's country decides, since 廈門 is nearer Kinmen's township centres than Taiwan's
+mountains are to theirs. Learning data stays on the phone (not iCloud).
 **Data use:** about 5 KB per widget refresh, plus CWA's full station list (~75 KB) once a week. Opening the full view
 adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour.
 
@@ -151,9 +155,10 @@ allow installing from that source; the first run asks for the CWA key, as on the
 - **Built and tested on GitHub Actions** (nothing to install on a PC): the script's and the shim's tests, the APKs
   (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101, first run as on a new phone:
   the CWA key (from the repository's secrets) typed into its dialog, then the full view, a detail sheet, the back
-  button, the radar, the 中文 link, the widgets and the test notifications, each photographed (the "emulator"
-  artifact of each run, never showing the key). The run fails on any script error, or if the key isn't kept, a link
-  or a notification doesn't work, or the widgets get no forecast. The release APK is signed with a key kept in the
+  button, the radar, the 中文 link, the widgets, the test notifications, and the widgets and full view with the
+  phone moved to Tokyo, each photographed (the "emulator" artifact of each run, never showing the key). The run fails
+  on any script error, or if the key isn't kept, a link or a notification doesn't work, the widgets get no forecast,
+  or abroad, a forecast still shows. The release APK is signed with a key kept in the
   repository's secrets, so each build installs over the one before.
 - `node test/android-shim.mjs` runs the shim's tests locally.
 

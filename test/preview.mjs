@@ -49,7 +49,7 @@ export function estimateWidth(node, parentLayout = "v", shrunk = false) {
 }
 
 const EMOJI = {
-  "sun.max.fill": "☀️", "moon.stars.fill": "🌙", "cloud.sun.fill": "⛅", "cloud.moon.fill": "☁️",
+  "globe.asia.australia.fill": "🌏", "sun.max.fill": "☀️", "moon.stars.fill": "🌙", "cloud.sun.fill": "⛅", "cloud.moon.fill": "☁️",
   "cloud.fill": "☁️", "cloud.rain.fill": "🌧️", "cloud.drizzle.fill": "🌦️", "cloud.bolt.rain.fill": "⛈️",
   "cloud.fog.fill": "🌫️", "cloud.snow.fill": "🌨️",
 };

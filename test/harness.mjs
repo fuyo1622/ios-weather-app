@@ -512,15 +512,86 @@ await test("station list: fetched in full once a week; other runs ask only for t
   assert.equal(E.env.usedICloud, false, "state stays on the device (iCloud may be full)");
 });
 
-await test("outside Taiwan: no CWA forecast and no far-away station, models only", async () => {
+await test("warning texts: one CWA has just lifted (its notice names no areas) isn't shown as in force", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.net.warnings = [{ phenomena: "陸上強風", significance: "特報", end: "2026-10-02 23:00:00" },
+    { phenomena: "大雨", significance: "特報", end: "2026-10-02 23:00:00", lifted: true }];
+  assert.deepEqual((await W.fetchWarningTexts("KEY")).map((t) => t.title), ["陸上強風特報"]);
+});
+
+await test("outside Taiwan far away (Tokyo): no forecast and nothing downloaded; the widgets and the full view say so", async () => {
   reset({ at: E.tw("2026-10-01T12:00") });
   E.env.location = { latitude: 35.68, longitude: 139.76 }; // Tokyo
   const r = await W.run("KEY");
-  assert.deepEqual(r.errors, []);
-  assert.deepEqual([...r.sources].sort(), Object.keys(E.MODEL_ERRORS).sort());
-  assert.equal(r.station, null);
-  assert.equal(r.place, "35.68, 139.76");
-  assert.ok(!E.net.log.some((u) => u.includes("F-D0047")));
+  assert.equal(r.outside, true);
+  assert.deepEqual([E.net.log.length, E.env.geocodeCalls], [0, 0], "nothing asked of the network abroad");
+  for (const family of ["small", "medium", "large", "accessoryRectangular", "accessoryInline"]) {
+    assert.ok(E.texts(W.buildWidget(r, family)).includes("Outside Taiwan"), family);
+  }
+  assert.ok(W.buildWidget(r, "accessoryCircular"), "the round lock-screen widget draws too");
+  assert.equal(W.nowText(r), "No forecast here");
+  const html = W.detailHTML(r, { current: "here" });
+  assert.ok(html.includes('id="outside">Outside Taiwan<') && html.includes("Places you've saved still have theirs"));
+  assert.ok(!/id="outlook"|class="temp"|class="hours"|How this forecast is made/.test(html), "no forecast on the page");
+  assert.equal(await W.savedForecast(null), null, "nothing to show while the next one loads");
+  W.setLang("zh");
+  const zh = W.detailHTML(r, { current: "here" });
+  fs.writeFileSync(path.join(E.stateDir, "app-outside-zh.html"), zh);
+  assert.ok(zh.includes('id="outside">不在臺灣<'));
+  assert.ok(E.texts(W.buildWidget(r, "small")).includes("不在臺灣"));
+  // back in Taiwan: its forecast again
+  E.env.location = E.HOME;
+  const home = await W.run("KEY");
+  assert.deepEqual([home.outside, home.place], [undefined, "臺北市信義區"]);
+  // where CWA's stations are farthest from a township centre (mountains, an islet) is still near enough to ask;
+  // Yonaguni, 119 km off 蘇澳, isn't
+  for (const [loc, near] of [[{ latitude: 24.39, longitude: 121.31 }, true], [{ latitude: 25.63, longitude: 122.07 }, true],
+    [{ latitude: 24.47, longitude: 123.0 }, false]]) {
+    assert.equal(W.nearestTown(loc).distance <= W.CONFIG.taiwanReachKm, near, JSON.stringify(loc));
+  }
+});
+
+await test("outside Taiwan near Kinmen: the geocoder's country tells 廈門 from 金門; notifications only in Taiwan", async () => {
+  // 廈門 is 7–16 km from Kinmen's township centres, nearer than Taiwan's mountains are to theirs: distance can't tell
+  reset({ at: E.tw("2026-10-02T14:20") });
+  E.net.warnings = [{ phenomena: "大雨", significance: "特報", end: "2026-10-02 23:00:00" }];
+  const settings = { lang: "en", places: [], notify: { rain: true, warnings: true } };
+  Object.assign(E.env, { location: { latitude: 24.48, longitude: 118.12 },
+    geocode: () => [{ isoCountryCode: "CN", country: "中國", administrativeArea: "福建省", locality: "廈門市", subLocality: "思明區" }] });
+  let r = await W.run("KEY", { settings });
+  assert.equal(r.outside, true);
+  assert.deepEqual(E.env.notifications, [], "no warning notifications abroad");
+  Object.assign(E.env, { location: { latitude: 24.43, longitude: 118.32 },
+    geocode: () => [{ isoCountryCode: "TW", country: "台灣", administrativeArea: "金門縣", locality: "金城鎮" }] });
+  r = await W.run("KEY", { settings });
+  assert.deepEqual([r.outside, r.place, r.placeVia], [undefined, "金門縣金城鎮", "apple"]);
+  assert.ok(r.sources.includes("cwa") && E.env.notifications.some((n) => n.title.includes("大雨特報")));
+  // a map that files Taiwan under another country still names it; at sea, the Taiwan Strait counts as Taiwan
+  for (const mark of [{ isoCountryCode: "CN", country: "中国", administrativeArea: "台湾省" }, { ocean: "台灣海峽" }]) {
+    reset({ at: E.tw("2026-10-02T14:20") });
+    Object.assign(E.env, { location: { latitude: 24.6, longitude: 120.1 }, geocode: () => [mark] });
+    assert.notEqual((await W.run("KEY")).outside, true, JSON.stringify(mark));
+  }
+});
+
+await test("outside Taiwan in the app and the widgets: My Location says so, a saved place still shows its forecast", async () => {
+  reset({ at: E.tw("2026-10-01T15:30") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  savePlaces(["臺南市東區"]);
+  E.env.location = { latitude: 37.57, longitude: 126.98 }; // Seoul
+  E.setConfig({ runsInWidget: true, widgetFamily: "medium" });
+  await W.main();
+  assert.deepEqual(E.texts(E.env.widget).slice(0, 3), ["My Location", "Outside Taiwan", "No forecast here"]);
+  E.scriptArgs.widgetParameter = "臺南市東區";
+  await W.main();
+  assert.ok(E.texts(E.env.widget).includes("臺南市東區") && E.texts(E.env.widget).some((t) => /^\d+°$/.test(t)));
+  E.scriptArgs.widgetParameter = null;
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.ok(E.env.html.includes('id="outside">Outside Taiwan<') && E.env.html.includes(">臺南市東區</a>"));
+  fs.writeFileSync(path.join(E.stateDir, "app-outside.html"), E.env.html);
+  await E.tap("tw-weather://show?place=0&dir=left");
+  assert.ok(E.env.html.includes('<p class="place">臺南市東區</p>') && E.env.html.includes('class="temp"'));
 });
 
 await test("CWA rejects the key: models still work, the error is shown", async () => {
@@ -1222,11 +1293,14 @@ await test("radar: the last two hours animate (RainViewer); CWA's image when Rai
   assert.ok(!E.env.html.includes('id="play"') && E.env.html.includes("O-A0058-006.png"));
 });
 
-// Results for the widget checks: a rainy afternoon, a clear night, and a worst case (long texts, stale).
+// Results for the widget checks: a rainy afternoon, a clear night, a worst case (long texts, stale), and abroad.
 reset({ at: E.tw("2026-10-02T13:20") });
 const wet = await W.run("KEY");
 reset({ at: E.tw("2026-10-01T23:20") });
 const night = await W.run("KEY");
+reset({ at: E.tw("2026-10-02T13:20") });
+E.env.location = { latitude: 35.68, longitude: 139.76 }; // Tokyo
+const away = await W.run("KEY");
 const worst = { ...wet, place: "高雄市那瑪夏區", stale: true, station: null,
   warnings: [{ title: "豪雨特報", until: "2026-10-03 23:00:00" }, { title: "陸上強風特報", until: "2026-10-03 23:00:00" }],
   rows: wet.rows.map((h, i) => (i === 0 ? { ...h, wx: "多雲時陰短暫陣雨或雷雨", t: -12.4 } : h)),
@@ -1235,6 +1309,7 @@ E.clock.now = E.tw("2026-10-02T13:20");
 
 await test("every widget family renders; medium shows 8 hours, large 24 hours and tomorrow", () => {
   for (const r of [wet, night, worst]) for (const family of FAMILIES) assert.ok(E.texts(W.buildWidget(r, family)).length);
+  for (const family of FAMILIES) assert.ok(W.buildWidget(away, family).children.length, family);
   const hours = (family) => E.texts(W.buildWidget(wet, family)).filter((t) => /^\d\d$/.test(t));
   assert.deepEqual(hours("medium"), ["14", "16", "18", "20", "22", "00", "02", "04"]);
   assert.equal(hours("large").length, 24);
@@ -1250,7 +1325,7 @@ await test("widgets fit iPhone SE, 15/16 and Pro Max sizes in English and 中文
     W.setLang(lang);
     for (const [device, sizes] of Object.entries(DEVICES)) {
       for (const family of FAMILIES) {
-        for (const [name, r] of Object.entries({ wet, night, worst })) {
+        for (const [name, r] of Object.entries({ wet, night, worst, away })) {
           const w = W.buildWidget(r, family), [width, height] = sizes[family];
           const needH = estimateHeight(w), needW = estimateWidth(w, "v", true);
           if (needH > height || needW > width) {
@@ -1268,7 +1343,7 @@ const sections = [];
 for (const lang of ["en", "zh"]) {
   W.setLang(lang);
   for (const [title, r] of [["Rainy afternoon (13:20)", wet], ["Clear night (23:20)", night],
-    ["Worst case: long place and condition, stale, -12°", worst]]) {
+    ["Worst case: long place and condition, stale, -12°", worst], ["Abroad (Tokyo): no forecast", away]]) {
     for (const [device, sizes] of Object.entries(DEVICES)) {
       sections.push({ title: `${lang === "zh" ? "中文 · " : ""}${title} · ${device}`,
         cards: FAMILIES.map((f) => widgetHTML(W.buildWidget(r, f), f, sizes[f], f)) });
@@ -1277,7 +1352,7 @@ for (const lang of ["en", "zh"]) {
 }
 W.setLang("en");
 fs.writeFileSync(path.join(E.stateDir, "widgets.html"), previewPage("Taiwan Weather widget preview", sections));
-console.log("   preview: test/.state/widgets.html · full view: test/.state/app.html, app-zh.html");
+console.log("   preview: test/.state/widgets.html · full view: test/.state/app.html, app-zh.html, app-outside.html, app-outside-zh.html");
 
 // ---------------- Live ----------------
 if (process.env.OFFLINE) {

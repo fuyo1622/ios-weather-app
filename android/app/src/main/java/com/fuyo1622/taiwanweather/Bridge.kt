@@ -116,15 +116,19 @@ class Bridge(private val engine: Engine) {
         }
     }
 
-    /** The places at a point, from Android's geocoder: the script looks for a county and a township among them. */
+    /**
+     * The places at a point, from Android's geocoder, named as Scriptable names them: the script looks for a county
+     * and a township among them, and the country (Kinmen and Matsu are TW, the coast across the water isn't).
+     */
     @JavascriptInterface fun geocode(id: Int, latitude: Double, longitude: Double, locale: String) = io.execute {
         try {
             @Suppress("DEPRECATION")
             val found = Geocoder(context, Locale.forLanguageTag(locale.replace('_', '-'))).getFromLocation(latitude, longitude, 3)
             val list = JSONArray()
             for (a in found ?: emptyList()) {
-                list.put(JSONObject().put("adminArea", a.adminArea).put("subAdminArea", a.subAdminArea).put("locality", a.locality)
-                    .put("subLocality", a.subLocality).put("thoroughfare", a.thoroughfare).put("featureName", a.featureName))
+                list.put(JSONObject().put("isoCountryCode", a.countryCode).put("country", a.countryName)
+                    .put("administrativeArea", a.adminArea).put("subAdministrativeArea", a.subAdminArea).put("locality", a.locality)
+                    .put("subLocality", a.subLocality).put("thoroughfare", a.thoroughfare).put("name", a.featureName))
             }
             engine.finish(id, true, list.toString())
         } catch (e: Exception) {

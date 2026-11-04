@@ -30,7 +30,9 @@ const CONFIG = {
   cwaPriorMae: 1.0,            // CWA's own township forecast prior
   priorStrength: 24,           // how many samples the prior is "worth"
   nowcastDecayHours: 4,        // e-folding time for station-based correction
-  maxStationKm: 25,            // farther than this from any CWA station = outside Taiwan
+  maxStationKm: 25,            // farther than this from any CWA station = outside Taiwan (when the geocoder can't say)
+  taiwanReachKm: 70,           // farther than this from every township centre = outside Taiwan, known without the
+                               // network (CWA's farthest stations from one: 37 km in the mountains, 62 km on 彭佳嶼)
   historyDays: 21,             // how long verification data is kept
   hoursShown: 8,
   abroadTimeout: 10,           // s: Open-Meteo and RainViewer (servers in Germany) can stall from Taiwan; CWA gets 20
@@ -403,20 +405,26 @@ function nearestTown(loc) {
   return best;
 }
 
-// The CWA township at loc. Apple's geocoder knows the real borders, so its answer wins when its names
-// match a CWA township; otherwise the nearest township centre. Apple's answer is reused while within 1 km; after
-// no answer (a slow or offline geocoder), the next run asks again rather than keep the nearest centre.
+// The CWA township at loc, and its country. Apple's geocoder knows the real borders, so its answer wins when its
+// names match a CWA township; otherwise the nearest township centre. Its country tells Kinmen and Matsu from the
+// coast across the water ("TW", or another country's code; null without an answer). An answer is reused while
+// within 1 km; after none (a slow or offline geocoder), the next run asks again rather than keep the nearest centre.
 async function findTown(loc, state) {
   const last = state.place;
-  if (last && last.via === "apple" && distanceKm(loc, last) < 1) return last;
-  let match = null;
+  if (last && (last.via === "apple" || last.country) && distanceKm(loc, last) < 1) return last;
+  let match = null, country = null;
   try {
-    const names = ((await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [])
-      .flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
+    const marks = (await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [];
+    const names = marks.flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
     match = TOWN_POINTS.find((t) => names.includes(t.county) && names.includes(t.name));
+    // Taiwan by its code, or by name where a map files it under another country; at sea, the Taiwan Strait
+    const taiwan = (p) => p.isoCountryCode === "TW" ||
+      /[台臺][灣湾]|Taiwan/i.test([p.country, p.administrativeArea, p.ocean].filter(Boolean).join(" "));
+    const coded = marks.find((p) => p.isoCountryCode);
+    country = match || marks.some(taiwan) ? "TW" : coded ? coded.isoCountryCode : null;
   } catch (e) { /* offline or no answer: use the nearest centre */ }
   const town = match ? { ...match, via: "apple" } : { ...nearestTown(loc), via: "nearest" };
-  state.place = { county: town.county, name: town.name, via: town.via, distance: distanceKm(loc, town),
+  state.place = { county: town.county, name: town.name, via: town.via, country, distance: distanceKm(loc, town),
     latitude: loc.latitude, longitude: loc.longitude };
   return state.place;
 }
@@ -612,7 +620,7 @@ async function fetchWarningTexts(key) {
     return { title: info.datasetDescription, issued: info.issueTime,
       text: String(((w.contents || {}).content || {}).contentText || "").split("\n").map((l) => l.trim()).join("\n").trim(),
       areas: hazards.flatMap((h) => (((h.info || {}).affectedAreas || {}).location || []).map((l) => l.locationName)) };
-  });
+  }).filter((t) => t.areas.length || !t.text.includes("解除")); // a lifted one ("…故解除大雨特報。") isn't in force
 }
 
 // The latest CWA radar composite as a transparent image, with the latitude/longitude box it covers.
@@ -1099,6 +1107,8 @@ async function run(apiKey, opts = {}) {
   const state = (await store.load()) || emptyState();
   const loc = pinned ? { latitude: pinned.latitude, longitude: pinned.longitude } : await getLocation(state);
   state.lastLocation = loc;
+  // My Location far from every township: outside Taiwan, with nothing to download
+  if (!pinned && nearestTown(loc).distance > CONFIG.taiwanReachKm) return outsideTaiwan(state, store);
   const nowKey = hourKey(new Date());
   const errors = [];
   const settled = (res, fallback = null) => {
@@ -1122,14 +1132,16 @@ async function run(apiKey, opts = {}) {
     pinned ? { ...pinned, via: "saved", distance: 0 } : findTown(loc, state),
   ]);
 
-  // In Taiwan = a saved township, or a CWA station within reach (stations cover the mountains too), or without
-  // a key, a township centre. Outside Taiwan: no station correction and no CWA township forecast or warnings.
+  // In Taiwan = a saved township, or where the geocoder says Taiwan (Kinmen and Matsu, not the coast across the
+  // water); without its answer, a CWA station within reach (stations cover the mountains too), or without a key, a
+  // township centre. Outside Taiwan, My Location shows no forecast.
   const place = townRes.value;
   const stations = stationsRes.status === "fulfilled" ? stationsRes.value : [];
-  const inTaiwan = pinned ? true : stations.length
+  const inTaiwan = pinned ? true : place.country ? place.country === "TW" : stations.length
     ? stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm)
     : place.distance <= CONFIG.maxStationKm;
-  const cwaReq = stationsRes.status === "fulfilled" && inTaiwan ? Promise.allSettled([
+  if (!inTaiwan) return outsideTaiwan(state, store);
+  const cwaReq = stationsRes.status === "fulfilled" ? Promise.allSettled([
     fetchCWAForecast(apiKey, place.county, place.name, loc, !!forApp),
     shared("warnings " + place.county, 5, () => fetchWarnings(apiKey, place.county)),
     forApp ? fetchWeek(apiKey, place.county, place.name) : Promise.resolve(null),
@@ -1137,10 +1149,9 @@ async function run(apiKey, opts = {}) {
   const [modelsRes] = await modelsReq;
 
   const sources = {};
-  let station = null, town = null, warnings = [], week = null;
+  let station = null, town = place.county + place.name, warnings = [], week = null;
   if (modelsRes.status === "fulfilled") Object.assign(sources, modelsRes.value);
   else errors.push(modelsRes.reason.message);
-  if (inTaiwan) town = place.county + place.name;
   if (stationsRes.status === "fulfilled") {
     station = nearestStation(stations, loc);
     if (station && station.distance > CONFIG.maxStationKm) station = null;
@@ -1171,8 +1182,8 @@ async function run(apiKey, opts = {}) {
 
   const result = {
     updated: new Date().toISOString(),
-    place: town || `${loc.latitude.toFixed(2)}, ${loc.longitude.toFixed(2)}`,
-    placeVia: town ? place.via : null,
+    place: town,
+    placeVia: place.via,
     station: station && { name: station.name, t: station.t, weather: station.weather,
       distance: station.distance, time: station.time },
     rows: rows.slice(0, 48),
@@ -1202,6 +1213,16 @@ async function run(apiKey, opts = {}) {
     result.hours = detailHours(result, sources.cwa, extras, state);
   }
   if (!pinned && opts.settings) await notifyChanges(state, result, opts.settings);
+  state.lastResult = result;
+  store.save(state);
+  return result;
+}
+
+// My Location outside Taiwan: CWA's township forecasts cover Taiwan, Penghu, Kinmen and Matsu, so the full view and
+// the widgets say so instead of showing a forecast (saved places still show theirs), and no notification is sent.
+function outsideTaiwan(state, store) {
+  const result = { updated: new Date().toISOString(), outside: true, place: null, placeVia: null, station: null,
+    rows: [], summary: null, skill: {}, sources: [], pinned: null, warnings: [], errors: [] };
   state.lastResult = result;
   store.save(state);
   return result;
@@ -1261,6 +1282,9 @@ const WORDS = {
     noRainShort: "No rain next 24h", tomorrowLine: (hi, lo, pop) => `Tomorrow  H${hi} L${lo}  ·  Rain ${pop}`,
     stale: "stale", weatherError: "Weather error: ",
     unknownPlace: (p) => `Unknown place "${p}". Use a township, e.g. 臺南市東區.`,
+    outside: "Outside Taiwan", outsideShort: "No forecast here",
+    outsideNote: "There's no forecast for where you are: CWA's township forecasts cover Taiwan, Penghu, Kinmen and " +
+      "Matsu. Places you've saved still have theirs, and ＋ Add finds more.",
     via: { apple: "township from Apple Maps", nearest: "township from the nearest township centre", saved: "saved place" },
     station: (name, km) => `station ${name} ${km} km`, staleBanner: "Showing the last forecast.", until: (t) => `until ${t}`,
     noRain24: "No rain expected in the next 24 hours.", rainNowLong: (p) => `Rain now (${p}).`,
@@ -1299,6 +1323,7 @@ station pulls the next hours toward what it measures now, and every run checks e
 so sources that keep missing here lose weight. Temperature error (°C) per source, then samples and bias:`,
     source: "Source", hours: (a, b) => `${a}–${b} h`,
     footer: (t, map) => `Updated ${t} · Data: CWA 中央氣象署, Open-Meteo${map ? `, map © OpenStreetMap contributors${map === 2 ? ", radar © RainViewer" : ""}` : ""}`,
+    checked: (t) => `Location checked ${t}`,
     here: "My Location", add: "Add", addTitle: "Add a place", search: "Search a township, e.g. 東區", remove: "Remove",
     cancel: "Cancel", settings: "Settings", language: "Language", notifications: "Notifications for My Location",
     notifyRain: "Rain within the hour", notifyWarnings: "New CWA warnings", on: "On", off: "Off", loading: "Loading…",
@@ -1380,6 +1405,8 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     noRainShort: "24 小時內無雨", tomorrowLine: (hi, lo, pop) => `明天  高${hi} 低${lo}  ·  降雨 ${pop}`,
     stale: "舊資料", weatherError: "天氣錯誤：",
     unknownPlace: (p) => `找不到「${p}」。請輸入鄉鎮市區，例如 臺南市東區。`,
+    outside: "不在臺灣", outsideShort: "這裡沒有預報",
+    outsideNote: "你所在的地方沒有預報：氣象署的鄉鎮預報涵蓋臺灣、澎湖、金門與馬祖。已儲存的地點仍有預報，也可用「＋ 新增」加入地點。",
     via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點" },
     station: (name, km) => `測站 ${name} ${km} 公里`, staleBanner: "顯示上一次的預報。", until: (t) => `至 ${t}`,
     noRain24: "未來 24 小時預計不會下雨。", rainNowLong: (p) => `現在正在下雨（${p}）。`,
@@ -1418,6 +1445,7 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
 實測值；每次執行都會用測站資料檢查先前的預報，在這裡常常不準的來源，權重就會降低。各來源的溫度誤差（°C），以及樣本數與偏差：`,
     source: "來源", hours: (a, b) => `${a}–${b} 小時`,
     footer: (t, map) => `更新 ${t} · 資料：中央氣象署、Open-Meteo${map ? `，地圖 © OpenStreetMap 貢獻者${map === 2 ? "，雷達 © RainViewer" : ""}` : ""}`,
+    checked: (t) => `位置確認於 ${t}`,
     here: "目前位置", add: "新增", addTitle: "新增地點", search: "搜尋鄉鎮市區，例如 東區", remove: "移除",
     cancel: "取消", settings: "設定", language: "語言", notifications: "目前位置的通知",
     notifyRain: "一小時內下雨", notifyWarnings: "新的天氣特報", on: "開", off: "關", loading: "載入中…",
@@ -1528,6 +1556,7 @@ function addText(stack, str, size, opts = {}) {
 // follows within 3 hours, with its chance. "Rain now" only when the station sees rain.
 function nowText(r) {
   const s = r.summary, w = T();
+  if (r.outside) return w.outsideShort;
   if (!s.nextRain) return w.noRainShort;
   const soon = s.likelyRain && keyToDate(s.likelyRain) - keyToDate(s.nextRain) <= 3 * HOUR;
   const key = soon ? s.likelyRain : s.nextRain, pop = Math.round(soon ? s.likelyRainPop : s.nextRainPop);
@@ -1562,15 +1591,16 @@ function rightAligned(stack) {
 
 function buildWidget(r, family) {
   const w = new ListWidget();
-  const cur = r.station && r.station.t != null ? r.station.t : r.rows[0].t;
-  const wx = (r.station && r.station.weather) || r.rows[0].wx;
-  const symbol = wxSymbol(wx, r.rows[0].pop, r.rows[0].night);
-  const hiLo = T().hiLo(fmtT(r.summary.hi), fmtT(r.summary.lo));
   w.refreshAfterDate = new Date(Date.now() + CONFIG.refreshMinutes * 60e3); // iOS may wait longer
   // A tap opens the full view (a pinned widget's on its place). Set here, it works whatever the widget's
   // "When Interacting" option says; Scriptable's default, Open App, only opens the app.
   const open = "scriptable:///run/" + encodeURIComponent(Script.name());
   w.url = r.pinned ? `${open}?place=${encodeURIComponent(r.pinned)}` : open;
+  if (r.outside) return outsideWidget(w, family, r);
+  const cur = r.station && r.station.t != null ? r.station.t : r.rows[0].t;
+  const wx = (r.station && r.station.weather) || r.rows[0].wx;
+  const symbol = wxSymbol(wx, r.rows[0].pop, r.rows[0].night);
+  const hiLo = T().hiLo(fmtT(r.summary.hi), fmtT(r.summary.lo));
 
   if (family === "accessoryCircular") {
     w.addAccessoryWidgetBackground = true;
@@ -1639,6 +1669,37 @@ function buildWidget(r, family) {
     addText(w, `${r.stale ? `⚠︎ ${T().stale} · ` : ""}${time}` +
       (r.station ? ` · ${r.station.name} ${r.station.distance.toFixed(1)}km` : ""), 9, { color: C.dim, minScale: 0.8 });
   }
+  return w;
+}
+
+// My Location outside Taiwan (outsideTaiwan): the widget says so, with the time it last looked.
+function outsideWidget(w, family, r) {
+  const t = T(), globe = "globe.asia.australia.fill";
+  if (family === "accessoryCircular") {
+    w.addAccessoryWidgetBackground = true;
+    const s = w.addStack(); s.layoutVertically(); s.centerAlignContent();
+    addSymbol(s, globe, 18);
+    return w;
+  }
+  if (family === "accessoryInline") { addText(w, t.outside, 12); return w; }
+  if (family === "accessoryRectangular") {
+    addText(w, t.outside, 15, { bold: true });
+    addText(w, t.outsideShort, 12);
+    return w;
+  }
+  const g = new LinearGradient();
+  g.colors = [C.bgTop, C.bgBottom]; g.locations = [0, 1];
+  w.backgroundGradient = g;
+  w.setPadding(10, 14, 10, 14);
+  const top = w.addStack(); top.centerAlignContent();
+  addText(top, t.here, 12, { color: C.dim, minScale: 0.6 });
+  top.addSpacer();
+  addSymbol(top, globe, 20);
+  w.addSpacer();
+  addText(w, t.outside, family === "small" ? 20 : 24, { bold: true, minScale: 0.6 });
+  addText(w, t.outsideShort, 12, { color: C.dim, minScale: 0.7 });
+  w.addSpacer();
+  addText(w, new Date(r.updated).toTimeString().slice(0, 5), 9, { color: C.dim });
   return w;
 }
 
@@ -1836,7 +1897,7 @@ function detailPage(r) {
 // (places, language, notifications) are handled by main(). ui = { settings, current: "here" or a place index }.
 function detailHTML(r, ui = {}) {
   const w = T(), settings = ui.settings || DEFAULT_SETTINGS, places = settings.places || [];
-  const now = r.rows[0], cur = r.station && r.station.t != null ? r.station.t : now.t;
+  const now = r.rows[0] || {}, cur = r.station && r.station.t != null ? r.station.t : now.t; // (no rows: outside Taiwan)
   const wx = (r.station && r.station.weather) || now.wx || "";
   const symbol = wxSymbol(wx, now.pop, now.night);
   const sky = (/bolt|rain|drizzle|snow/.test(symbol) ? "rain" : /fog|cloud\.fill/.test(symbol) ? "cloudy" : "clear") +
@@ -2018,6 +2079,7 @@ main { max-width: 560px; margin: 0 auto; padding: max(14px, env(safe-area-inset-
 h2, h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
 .alert { background: rgba(120, 70, 0, .45); } .alert p { margin: 2px 0; } .alert span { color: var(--dim); font-size: 14px; }
 .summary { margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); font-size: 15px; }
+.summary.alone { margin: 0; padding: 0; border: 0; line-height: 1.45; }
 .hours { display: flex; gap: 2px; overflow-x: auto; list-style: none; margin: 0; padding: 0; scrollbar-width: none; }
 .hours li { flex: 0 0 52px; display: grid; justify-items: center; gap: 4px; font-size: 15px; }
 .hours li b { font-size: 24px; line-height: 28px; } .hours small { color: #7cc4ff; font-size: 12px; font-weight: 600; min-height: 14px; }
@@ -2115,18 +2177,20 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
   border-radius: 12px; padding: 8px 14px; }
 </style></head><body class="${sky}" data-loading="${w.loading}" data-enter="${ui.enter || ""}"><main>
 <nav class="places">${chips}</nav>
-<header class="hero">
+<header class="hero">${r.outside ? `
+  <p class="place" id="outside">${w.outside}</p>` : `
   <p class="place">${esc(r.place)}</p>
   <p class="via">${r.placeVia ? esc(w.via[r.placeVia] || r.placeVia) : ""}${r.station ? " · " + w.station(esc(r.station.name), r.station.distance.toFixed(1)) : ""}</p>
   ${r.updating ? `<p class="via" id="updating">↻ ${esc(w.updating(twTime(r.updated)))}</p>` : ""}
   <p class="temp">${fmtT(cur)}</p>
   <p class="cond">${esc(wx)}</p>
-  <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>
+  <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>`}
 </header>
 ${r.stale ? card("", `<p>${w.staleBanner} ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
 ${warnings ? card("", warnings, "alert", dp && dp.warnings.length ? "warnings" : "") : ""}
 ${nextHour}
-${card("", `<p class="summary" id="outlook">${outlook(r)}</p><ol class="hours">${hours}</ol>`, "", dp ? "conditions" : "")}
+${r.outside ? card("", `<p class="summary alone">${w.outsideNote}</p>`)
+    : card("", `<p class="summary" id="outlook">${outlook(r)}</p><ol class="hours">${hours}</ol>`, "", dp ? "conditions" : "")}
 ${days.length ? card(`📅 ${w.days(days.length)}`, `<ol class="days">${dayRows}</ol>`) : ""}
 ${radar}
 ${tiles.length ? `<div class="tiles">${tiles.join("")}</div>` : ""}
@@ -2135,9 +2199,9 @@ ${card(`⚙️ ${w.settings}`, `<p class="row"><span>${w.language}</span><span c
   `<a class="seg-btn${LANG === "zh" ? " on" : ""}" href="${act("lang?to=zh")}">中文</a></span></p>` +
   `<h2 style="margin-top:12px">${w.notifications}</h2>${toggle("rain", w.notifyRain)}${toggle("warnings", w.notifyWarnings)}` +
   `<p class="row"><span></span><a class="seg-btn" href="${act("test")}">${w.testButton}</a></p>`)}
-${card("", `<details><summary>${w.howTitle}</summary><p>${w.howText(models)}</p>
+${r.outside ? "" : card("", `<details><summary>${w.howTitle}</summary><p>${w.howText(models)}</p>
 <table><tr><th>${w.source}</th><th>${w.hours(0, 6)}</th><th>${w.hours(6, 24)}</th><th>${w.hours(24, 48)}</th></tr>${skillRows}</table></details>`)}
-<footer>${w.footer(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}${ui.timing ? "<br>" + w.timing(ui.timing) : ""}
+<footer>${(r.outside ? w.checked : w.footer)(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}${ui.timing ? "<br>" + w.timing(ui.timing) : ""}
 ${r.errors.length && !r.stale ? `<br><span class="err">${r.errors.map(esc).join("<br>")}</span>` : ""}</footer>
 </main>
 ${dots}

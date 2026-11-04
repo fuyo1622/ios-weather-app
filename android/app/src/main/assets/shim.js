@@ -103,11 +103,15 @@
   // the rain line, the hours (8, every 2 hours, and 24), tomorrow, and the bottom line (warnings, or the time and
   // the station).
   function widgetData(W, r) {
-    const T = W.T(), now = r.rows[0], cur = r.station && r.station.t != null ? r.station.t : now.t;
+    const T = W.T(), time = new Date(r.updated).toTimeString().slice(0, 5);
+    // My Location outside Taiwan: no forecast, the widget says so
+    if (r.outside) return { place: T.here, temp: "–", icon: "🌏", condition: T.outside, hiLo: "", rain: T.outsideShort,
+      hours8: [], hours24: [], tomorrow: "", bottom: time, bottomSmall: time, warn: false, updated: r.updated, outside: true };
+    const now = r.rows[0], cur = r.station && r.station.t != null ? r.station.t : now.t;
     const wx = (r.station && r.station.weather) || now.wx || "";
     const hour = (h) => ({ h: W.fmtHour(h.key), icon: W.EMOJI[W.wxSymbol(h.wx, h.pop, h.night)], t: W.fmtT(h.t),
       pop: h.pop == null ? "" : Math.round(h.pop) + "%" });
-    const titles = (r.warnings || []).map((x) => x.title), time = new Date(r.updated).toTimeString().slice(0, 5);
+    const titles = (r.warnings || []).map((x) => x.title);
     // active CWA warnings replace the bottom line; small widgets name the first and count the rest ("⚠︎ 豪雨特報 +1")
     const warning = (compact) => "⚠︎ " + (compact && titles.length > 1 ? `${titles[0]} +${titles.length - 1}` : titles.join(" · "));
     const plain = (r.stale ? `⚠︎ ${T.stale} · ` : "") + time + (r.station ? ` · ${r.station.name} ${r.station.distance.toFixed(1)}km` : "");

@@ -142,6 +142,20 @@ await test("widgets: in 中文, as the app's language is", async () => {
   assert.match(d.tomorrow, /^明天  高\d+° 低\d+°  ·  降雨 \d+%$/);
 });
 
+await test("widgets abroad: My Location says it's outside Taiwan, with nothing downloaded for it; a saved place still has its forecast", async () => {
+  fixtures(E.tw("2026-10-02T13:20"));
+  const p = phone({ key: "KEY", located: { latitude: 35.68, longitude: 139.76 } }); // Tokyo
+  p.ctx.__start("widget", { places: ["", "臺南市東區"] });
+  await until(() => p.seen.done, 10000);
+  const [here, tainan] = p.seen.widgets.map((w) => w.data);
+  assert.deepEqual([here.outside, here.place, here.temp, here.condition, here.rain, here.hours8.length, here.tomorrow],
+    [true, "My Location", "–", "Outside Taiwan", "No forecast here", 0, ""]);
+  assert.match(here.bottom, /^\d\d:\d\d$/);
+  assert.equal(tainan.place, "臺南市東區");
+  assert.ok(!p.seen.http.some((u) => u.includes("139.76")), "nothing asked about Tokyo");
+  assert.deepEqual(p.seen.notes, []);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
 setTimeout(() => process.exit(), 1000).unref(); // a failed test may leave a page's timer running: end anyway

@@ -138,10 +138,11 @@ export function weekFixture(ms, townName) {
     ] }] }] } };
 }
 
-// net.warnings: active CWA warnings, as { phenomena, significance, end: "YYYY-MM-DD HH:MM:SS" }.
+// net.warnings: active CWA warnings, as { phenomena, significance, end: "YYYY-MM-DD HH:MM:SS" }; with lifted: true, one
+// CWA has just lifted (gone from the warnings in force; its text a notice of the lifting, with no areas).
 export function warningsFixture(county) {
   return { success: "true", records: { location: [{ locationName: county, geocode: 63, hazardConditions: {
-    hazards: net.warnings.map((w) => ({ info: { language: "zh-TW", phenomena: w.phenomena, significance: w.significance },
+    hazards: net.warnings.filter((w) => !w.lifted).map((w) => ({ info: { language: "zh-TW", phenomena: w.phenomena, significance: w.significance },
       validTime: { startTime: "2026-10-01 00:00:00", endTime: w.end } })) } }] } };
 }
 
@@ -149,8 +150,9 @@ export function warningsFixture(county) {
 export const warningTextsFixture = () => ({ success: "true", records: { record: net.warnings.map((w) => ({
   datasetInfo: { datasetDescription: w.phenomena + w.significance, validTime: { startTime: "2026-10-01 00:00:00", endTime: w.end },
     issueTime: "2026-10-02 04:29:00" },
-  contents: { content: { contentLanguage: "zh-TW", contentText: "\n      一、概述：" + w.phenomena + "，請注意。\n\n      二、注意事項\n      " } },
-  hazardConditions: { hazards: { hazard: [{ info: { phenomena: w.phenomena, significance: w.significance,
+  contents: { content: { contentLanguage: "zh-TW", contentText: w.lifted ? `由於降雨趨於緩和，發生${w.phenomena}的機率降低，故解除${w.phenomena + w.significance}。`
+    : "\n      一、概述：" + w.phenomena + "，請注意。\n\n      二、注意事項\n      " } },
+  hazardConditions: w.lifted ? {} : { hazards: { hazard: [{ info: { phenomena: w.phenomena, significance: w.significance,
     affectedAreas: { location: [{ locationName: "臺北市" }, { locationName: "新北市" }] } } }] } } })) } });
 
 export const radarFixture = () => ({ cwaopendata: { dataid: "O-A0058-006", dataset: {
@@ -348,7 +350,7 @@ class ListWidget extends WidgetStack {
 export const texts = (node) => node.type === "text" ? [node.text] : (node.children || []).flatMap(texts);
 
 // SF Symbols the script may use (SFSymbol.named returns null for unknown names, like Scriptable).
-export const KNOWN_SYMBOLS = new Set(["sun.max.fill", "moon.stars.fill", "cloud.sun.fill", "cloud.moon.fill",
+export const KNOWN_SYMBOLS = new Set(["globe.asia.australia.fill", "sun.max.fill", "moon.stars.fill", "cloud.sun.fill", "cloud.moon.fill",
   "cloud.fill", "cloud.rain.fill", "cloud.drizzle.fill", "cloud.bolt.rain.fill", "cloud.fog.fill", "cloud.snow.fill"]);
 
 export const keychain = new Map();
