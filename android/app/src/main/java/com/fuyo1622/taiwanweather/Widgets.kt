@@ -6,6 +6,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
 import org.json.JSONArray
@@ -70,31 +71,40 @@ object Widgets {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
         val raw = context.getSharedPreferences(DATA, Context.MODE_PRIVATE).getString(place, null)
         val d = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
-        if (d == null || d.has("error")) {
-            v.setTextViewText(R.id.place, place.ifEmpty { context.getString(R.string.my_location) })
-            v.setTextViewText(R.id.temp, "–")
-            v.setTextViewText(R.id.rain, d?.optString("error") ?: context.getString(R.string.loading))
-            return v
-        }
-        v.setTextViewText(R.id.place, d.optString("place"))
-        v.setTextViewText(R.id.temp, d.optString("temp"))
-        v.setTextViewText(R.id.icon, d.optString("icon"))
-        v.setTextViewText(R.id.rain, d.optString("rain"))
-        v.setTextViewText(R.id.bottom, d.optString(if (size == "small") "bottomSmall" else "bottom"))
-        v.setTextColor(R.id.bottom, if (d.optBoolean("warn")) 0xFFFFD166.toInt() else 0xA6FFFFFF.toInt()) // warnings in amber
+        val ok = d != null && !d.has("error")
+        val j = if (ok) d!! else JSONObject() // (none yet, or an error: every field empty)
+        val outside = j.optBoolean("outside") // My Location outside Taiwan: the notice where the temperature goes
+        // Every view is set on each update: Android updates a widget's views in place, so one left out keeps what it
+        // showed before (the last forecast's hours beside an error, say).
+        v.setTextViewText(R.id.place, if (ok) j.optString("place") else place.ifEmpty { context.getString(R.string.my_location) })
+        v.setTextViewText(R.id.temp, if (!ok) "–" else if (outside) j.optString("condition") else j.optString("temp"))
+        v.setTextViewTextSize(R.id.temp, TypedValue.COMPLEX_UNIT_SP, when {
+            outside -> if (size == "small") 18f else 22f // words, not a number ("Outside Taiwan" fits a small one at 18)
+            size == "large" -> 40f
+            else -> 34f
+        })
+        v.setTextViewText(R.id.icon, if (outside && size == "small") "" else j.optString("icon")) // (the notice's room)
+        v.setTextViewText(R.id.rain, if (ok) j.optString("rain") else d?.optString("error") ?: context.getString(R.string.loading))
+        v.setTextViewText(R.id.bottom, j.optString(if (size == "small") "bottomSmall" else "bottom"))
+        v.setTextColor(R.id.bottom, if (j.optBoolean("warn")) 0xFFFFD166.toInt() else 0xA6FFFFFF.toInt()) // warnings in amber
+        line(v, R.id.condition, if (outside) "" else if (size == "small") j.optString("condition")
+            else listOf(j.optString("condition"), j.optString("hiLo")).filter { it.isNotEmpty() }.joinToString("  "))
         if (size == "small") {
-            v.setTextViewText(R.id.condition, d.optString("condition"))
-            v.setTextViewText(R.id.hilo, d.optString("hiLo"))
+            line(v, R.id.hilo, if (outside) "" else j.optString("hiLo"))
         } else {
-            v.setTextViewText(R.id.condition, listOf(d.optString("condition"), d.optString("hiLo")).filter { it.isNotEmpty() }.joinToString("  "))
-            hours(context, v, R.id.hours, if (size == "medium") d.optJSONArray("hours8") else d.optJSONArray("hours24")?.let { first(it, 12) })
+            hours(context, v, R.id.hours, if (size == "medium") j.optJSONArray("hours8") else j.optJSONArray("hours24")?.let { first(it, 12) })
             if (size == "large") {
-                hours(context, v, R.id.hours2, d.optJSONArray("hours24")?.let { first(it, 24, from = 12) })
-                v.setTextViewText(R.id.tomorrow, d.optString("tomorrow"))
-                v.setViewVisibility(R.id.tomorrow, if (d.optString("tomorrow").isEmpty()) View.GONE else View.VISIBLE)
+                hours(context, v, R.id.hours2, j.optJSONArray("hours24")?.let { first(it, 24, from = 12) })
+                line(v, R.id.tomorrow, j.optString("tomorrow"))
             }
         }
         return v
+    }
+
+    // A line of text, hidden while it has none.
+    private fun line(v: RemoteViews, id: Int, text: String) {
+        v.setTextViewText(id, text)
+        v.setViewVisibility(id, if (text.isEmpty()) View.GONE else View.VISIBLE)
     }
 
     private fun first(list: JSONArray, end: Int, from: Int = 0) = JSONArray().also { out ->
