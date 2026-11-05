@@ -14,12 +14,18 @@ PKG=com.fuyo1622.taiwanweather
 mkdir -p "$OUT"
 
 ADB=$(command -v adb)
-adb() { timeout 120 "$ADB" "$@"; } # it waits for ever if the emulator dies: this ends the run instead
+adb() { timeout -k 5 60 "$ADB" "$@"; } # it waits for ever if the emulator dies: this ends the run instead
 shot() { adb exec-out screencap -p > "$OUT/$1.png"; }
 log() { adb logcat -d -s TaiwanWeather:* 2>/dev/null || true; }
+stage() { echo "== $(date +%T) $1"; }
+# what the machine and the emulator are doing, every 20 s, for a run that stalls
+( while sleep 20; do echo "   $(date +%T) load $(cut -d' ' -f1 /proc/loadavg), $(free -m | awk '/Mem:/{print $7}') MB free," \
+  "emulator $(pgrep -f qemu-system >/dev/null && echo up || echo GONE), adb $(timeout -k 2 8 "$ADB" get-state 2>&1 | tail -1)"; done ) &
+watching=$!
 typing=0
 finish() { # the app's log; after a failure, what was on screen and what Android said (public: never the key)
   status=$?
+  kill "$watching" 2>/dev/null || true
   log > "$OUT/logcat.txt"
   if [ "$status" -ne 0 ]; then
     [ "$typing" = 1 ] || shot failed || true
@@ -63,6 +69,7 @@ adb shell cmd location set-location-enabled true || true
 adb emu geo fix 121.5654 25.033 # Taipei 101 (longitude first)
 adb logcat -c
 
+stage "first run: the key dialog"
 # The first run, as on a new phone: the CWA key dialog.
 adb shell am start -n "$PKG/.MainActivity"
 adb emu geo fix 121.5654 25.033 # again, for an app that waits for a new fix
@@ -92,6 +99,7 @@ if [ -n "${CWA_KEY:-}" ]; then # kept for the next runs? (compared here, never p
   typing=0 # the dialog is long gone: the page is up
 fi
 sleep 12 # the next-hour card reads the radar images
+stage "full view"
 shot 1-full-view
 page "document.getElementById('nh-source') ? document.getElementById('nh-text').textContent + ' | ' + document.getElementById('nh-source').textContent : 'no next hour'"
 page "document.querySelector('[data-detail=conditions]').click(); 'opened the conditions sheet'"
@@ -103,8 +111,11 @@ shot 3-after-back
 page "document.getElementById('detail').hidden ? 'sheet closed by back' : 'sheet still open'"
 page "window.scrollTo(0, document.querySelector('.radar').offsetTop); 'scrolled to the radar'"
 sleep 8
+stage "radar"
 shot 4-radar
+stage "radar photographed"
 
+stage "links: Send a test, then 中文"
 # The page's links go to the script (tw-weather://): Send a test (a notification now, one more from the widgets'
 # next refresh), then 中文.
 loads=$(count "page loaded")
@@ -130,6 +141,7 @@ sleep 3
 shot 7-notification
 adb shell cmd statusbar collapse
 
+stage "no internet"
 # No internet: the app opened afresh keeps the last forecast, and says why once, in its own words.
 adb shell cmd connectivity airplane-mode enable
 sleep 5
@@ -146,6 +158,7 @@ shot 8-no-internet
 adb shell cmd connectivity airplane-mode disable
 sleep 10
 
+stage "abroad"
 # Abroad (Tokyo): My Location's widget, then the app opened afresh, say it's outside Taiwan. The phone moves through
 # Android's test location providers, so Tokyo is at once the newest fix the app can find (a GPS fix from the emulator
 # isn't, while the app still has one from Taipei under 10 minutes old; on a real trip that one is hours old).
