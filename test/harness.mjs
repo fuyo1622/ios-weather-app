@@ -37,7 +37,7 @@ const test = async (name, fn) => {
 const CONFIG0 = { ...W.CONFIG };
 function reset({ at = null, cwa = "fixture", om = "fixture" } = {}) {
   Object.assign(E.clock, { now: at });
-  Object.assign(E.net, { cwa, om, rainviewer: "fixture", cwaSite: "fixture", rainRadarGap: null, cwaKey: null,
+  Object.assign(E.net, { cwa, om, rainviewer: "fixture", cwaSite: "fixture", rainRadarGap: null, cwaKey: null, offline: false,
     unknownTowns: [], warnings: [], raw: {}, delay: {}, times: [] });
   Object.assign(E.scriptArgs, { widgetParameter: null, queryParameters: {} });
   Object.assign(W.CONFIG, CONFIG0);
@@ -620,7 +620,93 @@ await test("everything down: the last forecast is shown from the current hour on
   assert.equal(r.station, null);
   assert.equal(r.errors.length, 2);
   E.clock.now = E.tw("2026-10-03T12:05"); // nothing left that covers this hour
-  await assert.rejects(W.run("KEY"), /timed out/);
+  await assert.rejects(W.run("KEY"), /^Error: No internet connection\.$/, "no internet explains the timeout too");
+});
+
+await test("no internet: said once, in the app's own words and language, under the last forecast", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main(); // a forecast to fall back on
+  E.clock.now = E.tw("2026-10-02T13:50");
+  E.net.offline = true;
+  E.env.pages.length = 0;
+  await W.main();
+  const count = (html, words) => html.split(words).length - 1;
+  assert.equal(count(E.env.html, "Showing the last forecast. No internet connection."), 1, E.env.html.match(/class="card alert"[^]*?<\/section>/)?.[0]);
+  assert.equal(count(E.env.html, "No internet connection."), 1);
+  assert.ok(!E.env.html.includes("appears to be offline"));
+  fs.writeFileSync(path.join(E.stateDir, "app-offline.html"), E.env.html);
+  await E.tap("tw-weather://lang?to=zh"); // the language it's said in follows at once, like everything else
+  assert.equal(count(E.env.html, "沒有網路連線。"), 1);
+  assert.ok(!E.env.html.includes("No internet connection"));
+});
+
+await test("no internet and nothing saved: the page and the widget say so once", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.net.offline = true;
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  assert.deepEqual(E.texts(E.env.widget), ["Weather error: No internet connection."]);
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.equal(E.env.html.split("No internet connection.").length - 1, 1);
+  assert.ok(E.env.html.includes("Couldn't load the forecast. No internet connection."));
+});
+
+await test("errors: a problem shared by several downloads is said once; different ones each keep their line", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.net.cwa = "down"; // "The request timed out."
+  E.net.rainviewer = "down"; // the same words, from another server
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.equal(E.env.html.split("The connection timed out.").length - 1, 1);
+  await E.tap("tw-weather://lang?to=zh");
+  assert.equal(E.env.html.split("連線逾時。").length - 1, 1);
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.net.cwa = "unauthorized";
+  E.net.cwaSite = "down"; // a named source keeps its name
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  for (const line of ["CWA stations: Unauthorized", "CWA rain radar: The request timed out."]) assert.ok(E.env.html.includes(line), line);
+});
+
+await test("no internet in the mountains (武陵農場, 35 km from a township centre) is still Taiwan, not abroad", async () => {
+  const wuling = { latitude: 24.38, longitude: 121.31 };
+  assert.ok(W.nearestTown(wuling).distance > W.CONFIG.maxStationKm);
+  reset({ at: E.tw("2026-10-02T13:20") });
+  await W.run("KEY"); // the forecast from home, then up the mountain with no signal
+  E.clock.now = E.tw("2026-10-02T13:50");
+  E.net.offline = true;
+  E.env.location = wuling;
+  const r = await W.run("KEY");
+  assert.deepEqual([r.outside, r.stale], [undefined, true]);
+  // nor without a CWA key, where there are no stations to go by
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.env.location = wuling;
+  assert.equal((await W.run(null)).outside, undefined);
+});
+
+await test("language: the page changes at once and stays where it was; the widgets follow at their next refresh, and it says so", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  const note = "小工具會在下次更新時換語言";
+  E.env.pageState = { y: 1500, busy: false }; // down at the settings
+  await E.tap("tw-weather://lang?to=zh");
+  assert.ok(E.env.html.includes('<html lang="zh-Hant-TW">') && E.env.html.includes(note));
+  assert.ok(E.env.html.includes("window.scrollTo(0, 1500);"), "still at the settings");
+  fs.writeFileSync(path.join(E.stateDir, "app-lang-note.html"), E.env.html);
+  await E.tap("tw-weather://notify?rain=0"); // the note was for that moment; the place stays for this too
+  assert.ok(!E.env.html.includes(note) && E.env.html.includes("window.scrollTo(0, 1500);"));
+  await E.tap("tw-weather://lang?to=zh"); // already 中文: nothing to tell
+  assert.ok(!E.env.html.includes(note));
+  await E.tap("tw-weather://lang?to=en");
+  assert.ok(E.env.html.includes("Widgets change language at their next refresh"));
 });
 
 await test("old verification data is pruned after 21 days", async () => {
@@ -1125,7 +1211,7 @@ await test("a slow Open-Meteo doesn't hold up CWA's forecast, and a stalled one 
   const t0 = Date.now(), r = await W.run("KEY"), took = Date.now() - t0;
   assert.ok(took < 1500, took + " ms");
   assert.deepEqual(r.sources, ["cwa"]);
-  assert.match(r.errors.join(" "), /timed out/);
+  assert.deepEqual(r.errors, ["timeout"]);
   const cwa = E.net.times.find((t) => t.url.includes("F-D0047-061")), om = E.net.times.find((t) => t.url.includes("api.open-meteo.com"));
   assert.ok(cwa.end < om.end, "CWA's forecast came in before Open-Meteo was given up");
 });
@@ -1352,7 +1438,7 @@ for (const lang of ["en", "zh"]) {
 }
 W.setLang("en");
 fs.writeFileSync(path.join(E.stateDir, "widgets.html"), previewPage("Taiwan Weather widget preview", sections));
-console.log("   preview: test/.state/widgets.html · full view: test/.state/app.html, app-zh.html, app-outside.html, app-outside-zh.html");
+console.log("   preview: test/.state/widgets.html · full view: test/.state/app.html, app-zh.html, app-outside.html, app-outside-zh.html, app-offline.html, app-lang-note.html");
 
 // ---------------- Live ----------------
 if (process.env.OFFLINE) {

@@ -97,7 +97,7 @@
   const SFSymbol = { named: (name) => ({ image: { name } }) };
   const config = { runsInApp: false, runsInWidget: false, runsInAccessoryWidget: false, widgetFamily: null };
   const args = { widgetParameter: null, queryParameters: {} };
-  const Script = { name: () => "TaiwanWeather", setWidget() {}, complete() {} };
+  const Script = { name: () => "TaiwanWeather", setWidget() {}, complete() {}, refreshWidgets: () => Native.refreshWidgets() };
 
   // What a home-screen widget shows, as buildWidget() does on the iPhone: now, the condition, today's high and low,
   // the rain line, the hours (8, every 2 hours, and 24), tomorrow, and the bottom line (warnings, or the time and
@@ -132,6 +132,7 @@
   function android(W) {
     W.WORDS.en.via.apple = "township from Android's geocoder";
     W.WORDS.zh.via.apple = "鄉鎮由 Android 地理編碼判定";
+    W.WORDS.en.widgetsFollow = W.WORDS.zh.widgetsFollow = ""; // here they refresh at once (Script.refreshWidgets)
   }
 
   // Start the script: "app" (the full view, as when you open it), or "widget" (a forecast for each place a widget

@@ -264,16 +264,20 @@ async function lag(req) {
   entry.end = RealDate.now();
   if (ms > limit) throw new Error("The request timed out.");
 }
+// net.offline: no internet at all: every download fails with this, as Scriptable's Request does on the phone.
+const OFFLINE_MESSAGE = "The Internet connection appears to be offline.";
 class Request {
   constructor(url) { this.url = url; this.timeoutInterval = 60; }
   async loadJSON() {
     net.log.push(this.url);
     await lag(this);
+    if (net.offline) throw new Error(OFFLINE_MESSAGE);
     return (net.raw[this.url] = await this.respond());
   }
   async loadString() {
     net.log.push(this.url);
     await lag(this);
+    if (net.offline) throw new Error(OFFLINE_MESSAGE);
     if (this.url.includes("www.cwa.gov.tw/")) {
       if (net.cwaSite === "down") throw new Error("The request timed out.");
       if (net.cwaSite === "fixture") return rainRadarListFixture(clock.ms());

@@ -25,14 +25,14 @@ const until = async (ok, ms = 5000) => {
 const fixtures = (at) => {
   Object.assign(E.clock, { now: at });
   Object.assign(E.net, { cwa: "fixture", om: "fixture", rainviewer: "fixture", cwaSite: "fixture", rainRadarGap: null,
-    cwaKey: null, unknownTowns: [], warnings: [], raw: {}, delay: {}, times: [] });
+    cwaKey: null, offline: false, unknownTowns: [], warnings: [], raw: {}, delay: {}, times: [] });
 };
 
 // A phone for the shim: Bridge.kt's answers, and what was asked of it.
 function phone({ key = null, answer = { button: -1, values: [] }, located = E.HOME } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tw-android-"));
   const results = new Map(), keys = new Map(key ? [["CWA_API_KEY", key]] : []);
-  const seen = { pages: [], bases: [], alerts: [], notes: [], widgets: [], failed: [], lines: [], http: [], done: false };
+  const seen = { pages: [], bases: [], alerts: [], notes: [], widgets: [], failed: [], lines: [], http: [], refreshes: [], done: false };
   let ctx = null, presented = null;
   const reply = (id, ok, value) => {
     if (value != null) results.set(id, value);
@@ -55,6 +55,7 @@ function phone({ key = null, answer = { button: -1, values: [] }, located = E.HO
     viewEval: (id) => reply(id, true, JSON.stringify(JSON.stringify({ y: 0, busy: false }))), // Android: the value as JSON
     viewPresent: (id) => { presented = () => reply(id, true, null); },
     widget: (place, json) => seen.widgets.push({ place, data: JSON.parse(json) }),
+    refreshWidgets: () => seen.refreshes.push(JSON.parse(fs.readFileSync(path.join(dir, "taiwan-weather", "settings.json"), "utf8")).lang),
     failed: (m) => seen.failed.push(m),
     done: () => { seen.done = true; },
   };
@@ -154,6 +155,31 @@ await test("widgets abroad: My Location says it's outside Taiwan, with nothing d
   assert.equal(tainan.place, "臺南市東區");
   assert.ok(!p.seen.http.some((u) => u.includes("139.76")), "nothing asked about Tokyo");
   assert.deepEqual(p.seen.notes, []);
+});
+
+await test("language on Android: the widgets refresh at once, with the choice already saved, so the page needn't mention them", async () => {
+  fixtures(E.tw("2026-10-02T13:20"));
+  const p = phone({ key: "KEY" });
+  p.ctx.__start("app", {});
+  await until(() => p.page().includes('id="outlook"') && p.page().includes("const DETAIL = "));
+  p.ctx.__tw.link("tw-weather://lang?to=zh");
+  await until(() => p.page().includes("目前位置"));
+  assert.deepEqual(p.seen.refreshes, ["zh"]);
+  assert.ok(!p.page().includes("小工具會在下次更新"));
+  p.ctx.__tw.link("tw-weather://notify?rain=0"); // anything else leaves the widgets alone
+  await until(() => p.page().includes('notify?rain=1"'));
+  assert.deepEqual(p.seen.refreshes, ["zh"]);
+  p.close();
+  await until(() => p.seen.done);
+});
+
+await test("no internet on Android: a widget's error says so once, in the app's words", async () => {
+  fixtures(E.tw("2026-10-02T13:20"));
+  E.net.offline = true;
+  const p = phone({ key: "KEY" });
+  p.ctx.__start("widget", { places: [""] });
+  await until(() => p.seen.done, 10000);
+  assert.deepEqual(p.seen.widgets[0].data, { error: "Weather error: No internet connection." });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

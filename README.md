@@ -89,9 +89,13 @@ Scriptable always shows its own bar (with Close) above a page it presents; its A
   instant; a place not loaded within a second shows its last saved forecast (or its name) until the new one is in.
   Radar, warnings and the station list are downloaded once for all places. Each saved place keeps its own forecast
   history, so it learns its own source errors.
-- **Settings**: English / 中文 (the widgets follow), and notifications for My Location: rain starting within the
-  hour (at most every 3 hours, not while it's already raining) and each new CWA warning. **Send a test** sends one
-  now and arms a second for the next widget refresh, to check that widgets may notify.
+- **Settings**: English / 中文, and notifications for My Location: rain starting within the hour (at most every 3
+  hours, not while it's already raining) and each new CWA warning. **Send a test** sends one now and arms a second
+  for the next widget refresh, to check that widgets may notify. A new language applies to the full view at once and
+  to iPhone widgets at their next refresh: iOS decides when, and a script can't ask. (Scriptable's "Refresh All
+  Widgets" action in Shortcuts can, by opening Scriptable.)
+- **No internet**: the last forecast stays, marked as such, or the page says so if there's none; each problem is
+  said once, in the app's own words.
 - **Next hour**: when rain starts or stops within the hour (e.g. "Light rain starting in about 20 min"), with a chart.
   Worked out in the page from radar images: how the rain moved over the last 20 minutes, carried forward. The
   source is CWA's 降雨雷達 nearest to you (within 145 km) that sees where you are: three of its images about
@@ -149,16 +153,17 @@ allow installing from that source; the first run asks for the CWA key, as on the
   top of a small Android bridge (`Bridge.kt`). The page is loaded as a page of CWA's site, as on the iPhone, so the
   next-hour card can read the 降雨雷達. Android's back button first closes a sheet or the radar's full screen.
 - **Widgets** are Android's own layouts, filled from the same forecast and wording as the iPhone's (`widgetData` in
-  `shim.js`), refreshed every 15 minutes (Android's shortest) while online. Away from the app, My Location is the
-  last place the app saw: Android shares the location with apps in the background only with an extra permission.
-  Android has no lock-screen widgets.
+  `shim.js`), refreshed every 15 minutes (Android's shortest) while online, and at once when the language changes.
+  Away from the app, My Location is the last place the app saw: Android shares the location with apps in the
+  background only with an extra permission. Android has no lock-screen widgets.
 - **Built and tested on GitHub Actions** (nothing to install on a PC): the script's and the shim's tests, the APKs
   (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101, first run as on a new phone:
   the CWA key (from the repository's secrets) typed into its dialog, then the full view, a detail sheet, the back
-  button, the radar, the 中文 link, the widgets, the test notifications, and the widgets and full view with the
-  phone moved to Tokyo, each photographed (the "emulator" artifact of each run, never showing the key). The run fails
-  on any script error, or if the key isn't kept, a link or a notification doesn't work, the widgets get no forecast,
-  or abroad, a forecast still shows. The release APK is signed with a key kept in the
+  button, the radar, the 中文 link, the widgets, the test notifications, the full view in airplane mode, and the
+  widgets and full view with the phone moved to Tokyo, each photographed (the "emulator" artifact of each run, never
+  showing the key). The run fails on any script error, or if the key isn't kept, a link or a notification doesn't
+  work, the widgets get no forecast or don't follow the language, no internet isn't said once, or abroad, a forecast
+  still shows. The release APK is signed with a key kept in the
   repository's secrets, so each build installs over the one before.
 - `node test/android-shim.mjs` runs the shim's tests locally.
 

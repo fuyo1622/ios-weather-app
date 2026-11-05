@@ -19,6 +19,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -74,6 +75,8 @@ class Bridge(private val engine: Engine) {
             engine.finish(id, true, body)
         } catch (e: SocketTimeoutException) {
             engine.finish(id, false, "The request timed out.")
+        } catch (e: UnknownHostException) { // no internet: in iOS's words, which the script puts in its own
+            engine.finish(id, false, "The Internet connection appears to be offline.")
         } catch (e: Exception) {
             engine.finish(id, false, masked(e.message ?: e.javaClass.simpleName))
         }
@@ -159,6 +162,7 @@ class Bridge(private val engine: Engine) {
     }
 
     @JavascriptInterface fun widget(place: String, json: String) = engine.widget(place, json)
+    @JavascriptInterface fun refreshWidgets() { Refresh.now(context) }
     @JavascriptInterface fun failed(message: String) = engine.failed(message)
     @JavascriptInterface fun done() = engine.done()
 

@@ -303,6 +303,16 @@ async function getJSON(url, timeout = 20) {
   return await req.loadJSON();
 }
 
+// A failed download says so in iOS's words. The plain network failures are kept as a code, so each shows once however
+// many downloads it hit, and in the app's own words and language (errorLines).
+const NET_ERRORS = { timeout: /^The request timed out/,
+  offline: /^(The Internet connection appears to be offline|A server with the specified hostname could not be found)/ };
+const errorCode = (message) => Object.keys(NET_ERRORS).find((k) => NET_ERRORS[k].test(message)) || message;
+// What to show for a run's errors. No internet explains the rest.
+function errorLines(errors) {
+  return (errors.includes("offline") ? ["offline"] : errors).map((e) => T().net[e] || e);
+}
+
 // Downloads that are the same for every place (radar, warnings, the station list), shared by the places shown
 // in one full-view session for a few minutes. A failure isn't kept.
 const sharedDownloads = new Map();
@@ -1111,9 +1121,10 @@ async function run(apiKey, opts = {}) {
   if (!pinned && nearestTown(loc).distance > CONFIG.taiwanReachKm) return outsideTaiwan(state, store);
   const nowKey = hourKey(new Date());
   const errors = [];
+  const note = (message) => { const e = errorCode(message); if (!errors.includes(e)) errors.push(e); };
   const settled = (res, fallback = null) => {
     if (res.status === "fulfilled") return res.value;
-    errors.push(res.reason.message);
+    note(res.reason.message);
     return fallback;
   };
 
@@ -1132,15 +1143,15 @@ async function run(apiKey, opts = {}) {
     pinned ? { ...pinned, via: "saved", distance: 0 } : findTown(loc, state),
   ]);
 
-  // In Taiwan = a saved township, or where the geocoder says Taiwan (Kinmen and Matsu, not the coast across the
-  // water); without its answer, a CWA station within reach (stations cover the mountains too), or without a key, a
-  // township centre. Outside Taiwan, My Location shows no forecast.
+  // Outside Taiwan, My Location shows no forecast. It is where the geocoder names another country (Kinmen and Matsu
+  // are Taiwan, the coast across the water isn't); without its answer, where no CWA station is within reach (they
+  // cover the mountains too). With neither, offline or without a key, nothing says so: 武陵農場 is 35 km from a
+  // township centre, and a hiker with no signal there is still in Taiwan.
   const place = townRes.value;
   const stations = stationsRes.status === "fulfilled" ? stationsRes.value : [];
-  const inTaiwan = pinned ? true : place.country ? place.country === "TW" : stations.length
-    ? stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm)
-    : place.distance <= CONFIG.maxStationKm;
-  if (!inTaiwan) return outsideTaiwan(state, store);
+  const outside = !pinned && (place.country ? place.country !== "TW"
+    : stations.length > 0 && !stations.some((s) => s.latitude != null && distanceKm(loc, s) <= CONFIG.maxStationKm));
+  if (outside) return outsideTaiwan(state, store);
   const cwaReq = stationsRes.status === "fulfilled" ? Promise.allSettled([
     fetchCWAForecast(apiKey, place.county, place.name, loc, !!forApp),
     shared("warnings " + place.county, 5, () => fetchWarnings(apiKey, place.county)),
@@ -1151,7 +1162,7 @@ async function run(apiKey, opts = {}) {
   const sources = {};
   let station = null, town = place.county + place.name, warnings = [], week = null;
   if (modelsRes.status === "fulfilled") Object.assign(sources, modelsRes.value);
-  else errors.push(modelsRes.reason.message);
+  else note(modelsRes.reason.message);
   if (stationsRes.status === "fulfilled") {
     station = nearestStation(stations, loc);
     if (station && station.distance > CONFIG.maxStationKm) station = null;
@@ -1162,7 +1173,7 @@ async function run(apiKey, opts = {}) {
       warnings = settled(warnRes, []);
       week = settled(weekRes);
     }
-  } else errors.push(stationsRes.reason.message);
+  } else note(stationsRes.reason.message);
 
   if (!Object.keys(sources).length) {
     // Show the last good forecast from the current hour on, if it still reaches that far.
@@ -1170,7 +1181,7 @@ async function run(apiKey, opts = {}) {
     if (rows.length) {
       return { ...state.lastResult, rows, station: null, stale: true, errors, warnings: stillActive(state.lastResult.warnings) };
     }
-    throw new Error(errors.join("; "));
+    throw Object.assign(new Error(errorLines(errors).join(" · ")), { errors });
   }
 
   recordObservation(state, station);
@@ -1282,6 +1293,8 @@ const WORDS = {
     noRainShort: "No rain next 24h", tomorrowLine: (hi, lo, pop) => `Tomorrow  H${hi} L${lo}  ·  Rain ${pop}`,
     stale: "stale", weatherError: "Weather error: ",
     unknownPlace: (p) => `Unknown place "${p}". Use a township, e.g. 臺南市東區.`,
+    net: { offline: "No internet connection.", timeout: "The connection timed out." },
+    widgetsFollow: "Widgets change language at their next refresh. iOS decides when, usually within 20 minutes.",
     outside: "Outside Taiwan", outsideShort: "No forecast here",
     outsideNote: "There's no forecast for where you are: CWA's township forecasts cover Taiwan, Penghu, Kinmen and " +
       "Matsu. Places you've saved still have theirs, and ＋ Add finds more.",
@@ -1405,6 +1418,8 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     noRainShort: "24 小時內無雨", tomorrowLine: (hi, lo, pop) => `明天  高${hi} 低${lo}  ·  降雨 ${pop}`,
     stale: "舊資料", weatherError: "天氣錯誤：",
     unknownPlace: (p) => `找不到「${p}」。請輸入鄉鎮市區，例如 臺南市東區。`,
+    net: { offline: "沒有網路連線。", timeout: "連線逾時。" },
+    widgetsFollow: "小工具會在下次更新時換語言。更新時間由 iOS 決定，通常在 20 分鐘內。",
     outside: "不在臺灣", outsideShort: "這裡沒有預報",
     outsideNote: "你所在的地方沒有預報：氣象署的鄉鎮預報涵蓋臺灣、澎湖、金門與馬祖。已儲存的地點仍有預報，也可用「＋ 新增」加入地點。",
     via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點" },
@@ -2186,7 +2201,7 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
   <p class="cond">${esc(wx)}</p>
   <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>`}
 </header>
-${r.stale ? card("", `<p>${w.staleBanner} ${esc(r.errors.join("; "))}</p>`, "alert") : ""}
+${r.stale ? card("", `<p>${w.staleBanner} ${esc(errorLines(r.errors).join(" · "))}</p>`, "alert") : ""}
 ${warnings ? card("", warnings, "alert", dp && dp.warnings.length ? "warnings" : "") : ""}
 ${nextHour}
 ${r.outside ? card("", `<p class="summary alone">${w.outsideNote}</p>`)
@@ -2197,12 +2212,13 @@ ${tiles.length ? `<div class="tiles">${tiles.join("")}</div>` : ""}
 ${card(`⚙️ ${w.settings}`, `<p class="row"><span>${w.language}</span><span class="seg">` +
   `<a class="seg-btn${LANG === "en" ? " on" : ""}" href="${act("lang?to=en")}">English</a>` +
   `<a class="seg-btn${LANG === "zh" ? " on" : ""}" href="${act("lang?to=zh")}">中文</a></span></p>` +
+  (ui.langChanged && w.widgetsFollow ? `<p class="note">${w.widgetsFollow}</p>` : "") +
   `<h2 style="margin-top:12px">${w.notifications}</h2>${toggle("rain", w.notifyRain)}${toggle("warnings", w.notifyWarnings)}` +
   `<p class="row"><span></span><a class="seg-btn" href="${act("test")}">${w.testButton}</a></p>`)}
 ${r.outside ? "" : card("", `<details><summary>${w.howTitle}</summary><p>${w.howText(models)}</p>
 <table><tr><th>${w.source}</th><th>${w.hours(0, 6)}</th><th>${w.hours(6, 24)}</th><th>${w.hours(24, 48)}</th></tr>${skillRows}</table></details>`)}
 <footer>${(r.outside ? w.checked : w.footer)(new Date(r.updated).toTimeString().slice(0, 5), radar ? mapSource : 0)}${ui.timing ? "<br>" + w.timing(ui.timing) : ""}
-${r.errors.length && !r.stale ? `<br><span class="err">${r.errors.map(esc).join("<br>")}</span>` : ""}</footer>
+${r.errors.length && !r.stale ? `<br><span class="err">${errorLines(r.errors).map(esc).join("<br>")}</span>` : ""}</footer>
 </main>
 ${dots}
 <div class="incoming" id="incoming" hidden><p class="place" id="incoming-name"></p><p>${w.loading}</p></div>
@@ -2842,16 +2858,20 @@ async function showApp(key, settings, pinned) {
     // a page whose map or fonts are slow to load mustn't hold up the next swipe
     await within(wv.loadHTML(page, CWA_SITE), CONFIG.pageWaitMs);
   };
+  // How far the page is scrolled, and whether redrawing it now would get in the way.
+  const pageNow = async () => {
+    try {
+      const page = await within(wv.evaluateJavaScript("JSON.stringify(window.pageState ? pageState() : { y: 0, busy: false })"), 1000);
+      return JSON.parse(page) || { y: 0, busy: false };
+    } catch (e) { return { y: 0, busy: false }; } // a plain page
+  };
   let queue = Promise.resolve();
   const enqueue = (task) => (queue = queue.then(task).catch(() => draw()).catch(() => {}));
   // Redraw with what just came in, kept where it was scrolled to. Not while that would get in the way (a finger
   // on the screen, the place search, the 降雨雷達 tab or the animation open): then try again in 2 s, for up to a minute.
   const redraw = async (ticket, tries = 0) => {
     if (ticket !== shows) return;
-    let page = { y: 0, busy: false };
-    try {
-      page = JSON.parse(await within(wv.evaluateJavaScript("JSON.stringify(window.pageState ? pageState() : { y: 0, busy: false })"), 1000)) || page;
-    } catch (e) { /* a plain page */ }
+    const page = await pageNow();
     if (page.busy && tries < 30) {
       Timer.schedule(CONFIG.redrawRetryMs, false, () => enqueue(() => redraw(ticket, tries + 1)));
       return;
@@ -2864,7 +2884,7 @@ async function showApp(key, settings, pinned) {
     (r) => enqueue(() => { if (ticket !== shows) return; result = r; failure = null; return redraw(ticket); }),
     (e) => enqueue(() => {
       if (ticket !== shows) return;
-      if (result) result = { ...result, updating: false, stale: true, errors: [e.message] };
+      if (result) result = { ...result, updating: false, stale: true, errors: e.errors || [e.message] };
       else failure = e;
       return draw();
     }));
@@ -2895,6 +2915,7 @@ async function showApp(key, settings, pinned) {
       saveSettings(settings);
       return show("here");
     }
+    const langChanged = action === "lang" && params.to !== LANG, scrollY = (await pageNow()).y; // stays at the settings
     if (action === "lang") { settings.lang = params.to; setLang(params.to); }
     if (action === "notify") for (const k of Object.keys(params)) settings.notify[k] = params[k] === "1";
     if (action === "test") {
@@ -2902,7 +2923,9 @@ async function showApp(key, settings, pinned) {
       settings.notifyTest = true;
     }
     saveSettings(settings);
-    return draw();
+    // iOS alone decides when a widget refreshes, so there they follow later (and the page says so); Android can now
+    if (langChanged && Script.refreshWidgets) Script.refreshWidgets();
+    return draw({ scrollY, langChanged });
   };
   wv.shouldAllowRequest = (request) => {
     const url = String(request.url);

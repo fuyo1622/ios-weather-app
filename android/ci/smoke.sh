@@ -2,9 +2,9 @@
 # The emulator test (GitHub Actions, .github/workflows/android.yml): install the test build and open it at Taipei 101
 # as on a new phone, typing the CWA key ($CWA_KEY) into its first-run dialog; photograph the dialog, the full view, a
 # detail sheet, the page after Android's back button, the radar, the page after its 中文 link, the three widgets, the
-# test notification, and then, with the phone moved to Tokyo, the widgets and the page outside Taiwan; fail if the
-# script logged an error, the key wasn't kept, a link or a notification didn't work, the widgets got no forecast, or
-# abroad, either still showed one. The screenshots and the log are a public artifact: nothing here prints the
+# test notification, the page with no internet, and then, with the phone moved to Tokyo, the widgets and the page
+# outside Taiwan; fail if the script logged an error, the key wasn't kept, a link or a notification didn't work, the
+# widgets got no forecast or didn't follow the language, no internet wasn't said once, or abroad, a forecast showed. The screenshots and the log are a public artifact: nothing here prints the
 # key, and no screenshot is taken while it is on screen.
 #   bash android/ci/smoke.sh <app-debug.apk> <folder for the screenshots and the log>
 set -eu # (no pipefail: grep stopping early would fail the log pipes)
@@ -98,6 +98,7 @@ page "document.querySelector(\"a[href='tw-weather://test']\").click(); 'tapped S
 another "page loaded" "$loads" 30
 app_notes=$(notes "Notifications work.")
 loads=$(count "page loaded")
+refreshed=$(count "widgets refreshed")
 page "document.querySelector(\"a[href='tw-weather://lang?to=zh']\").click(); 'tapped 中文'"
 another "page loaded" "$loads" 30
 sleep 2
@@ -105,9 +106,7 @@ page "window.scrollTo(0, 0); document.body.innerText.includes('目前位置') ? 
 sleep 3
 shot 5-zh-view
 
-refreshed=$(count "widgets refreshed")
-adb shell am broadcast -n "$PKG/.DebugReceiver" -a REFRESH > /dev/null
-another "widgets refreshed" "$refreshed" 120
+another "widgets refreshed" "$refreshed" 120 # (the language change refreshes them by itself)
 widget_notes=$(notes "小工具的通知也正常")
 adb shell am start -n "$PKG/.WidgetPreviewActivity"
 sleep 5
@@ -116,6 +115,22 @@ adb shell cmd statusbar expand-notifications
 sleep 3
 shot 7-notification
 adb shell cmd statusbar collapse
+
+# No internet: the app opened afresh keeps the last forecast, and says why once, in its own words.
+adb shell cmd connectivity airplane-mode enable
+sleep 5
+adb shell am force-stop "$PKG"
+adb shell am start -n "$PKG/.MainActivity"
+for _ in $(seq 1 30); do
+  page "document.body.innerText.includes('顯示上一次的預報') ? 'last forecast shown' : 'waiting'"
+  sleep 3
+  log | grep 'eval: "last forecast shown"' > /dev/null && break
+done
+page "(document.body.innerText.match(/沒有網路連線/g) || []).length === 1 ? 'no internet said once' : 'said: ' + document.querySelector('.alert').innerText"
+sleep 2
+shot 8-no-internet
+adb shell cmd connectivity airplane-mode disable
+sleep 10
 
 # Abroad (Tokyo): My Location's widget, then the app opened afresh, say it's outside Taiwan. The phone moves through
 # Android's test location providers, so Tokyo is at once the newest fix the app can find (a GPS fix from the emulator
@@ -132,7 +147,7 @@ adb shell am broadcast -n "$PKG/.DebugReceiver" -a REFRESH > /dev/null
 another "widgets refreshed" "$refreshed" 120
 adb shell am start -n "$PKG/.WidgetPreviewActivity"
 sleep 4
-shot 8-widgets-abroad
+shot 9-widgets-abroad
 adb shell am force-stop "$PKG"
 adb shell am start -n "$PKG/.MainActivity"
 for _ in $(seq 1 30); do
@@ -140,7 +155,7 @@ for _ in $(seq 1 30); do
   sleep 3
   log | grep 'eval: "page outside Taiwan"' > /dev/null && break
 done
-shot 9-abroad-view
+shot 10-abroad-view
 
 log > "$OUT/logcat.txt"
 grep -q 'eval: "sheet closed by back"' "$OUT/logcat.txt" || fail "the back button didn't close the sheet"
@@ -148,6 +163,7 @@ grep -q 'eval: "page in 中文"' "$OUT/logcat.txt" || fail "the 中文 link didn
 grep -q "widget data for 'My Location': {\"place\"" "$OUT/logcat.txt" || fail "no forecast for the widgets"
 [ "$app_notes" -gt 0 ] || fail "no notification from the page's Send a test"
 [ "$widget_notes" -gt 0 ] || fail "no test notification from the widgets' refresh"
+grep -q 'eval: "no internet said once"' "$OUT/logcat.txt" || fail "with no internet, the page didn't say so once in its own words"
 grep -q "widget data for 'My Location': .*\"outside\":true" "$OUT/logcat.txt" || fail "abroad, the widget didn't say outside Taiwan"
 grep -q 'eval: "page outside Taiwan"' "$OUT/logcat.txt" || fail "abroad, the page didn't say outside Taiwan"
 if grep -E "Uncaught|TypeError|ReferenceError|SyntaxError|TaiwanWeather.js stopped" "$OUT/logcat.txt"; then fail "script errors above"; fi
