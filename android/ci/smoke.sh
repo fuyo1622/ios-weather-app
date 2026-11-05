@@ -56,6 +56,7 @@ tap() { # the first view on screen whose node in uiautomator's dump matches $1, 
 }
 notes() { adb shell dumpsys notification --noredact | grep -c -- "$1" || true; } # lines of the posted ones with $1
 
+adb shell settings put global hide_error_dialogs 1 # a freshly booted emulator's launcher can freeze: not over the app
 adb install -r "$APK"
 for p in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION POST_NOTIFICATIONS; do adb shell pm grant "$PKG" "android.permission.$p" || true; done
 adb shell cmd location set-location-enabled true || true
