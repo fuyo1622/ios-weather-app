@@ -58,7 +58,7 @@ jobs:
   emulator:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -79,6 +79,8 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          cores: 4
+          ram-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: bash android/ci/smoke.sh apks/debug/app-debug.apk shots

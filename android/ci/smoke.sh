@@ -13,9 +13,20 @@ OUT=${2:-shots}
 PKG=com.fuyo1622.taiwanweather
 mkdir -p "$OUT"
 
+ADB=$(command -v adb)
+adb() { timeout 120 "$ADB" "$@"; } # it waits for ever if the emulator dies: this ends the run instead
 shot() { adb exec-out screencap -p > "$OUT/$1.png"; }
 log() { adb logcat -d -s TaiwanWeather:* 2>/dev/null || true; }
-trap 'log > "$OUT/logcat.txt"' EXIT
+typing=0
+finish() { # the app's log; after a failure, what was on screen and what Android said (public: never the key)
+  status=$?
+  log > "$OUT/logcat.txt"
+  if [ "$status" -ne 0 ]; then
+    [ "$typing" = 1 ] || shot failed || true
+    adb logcat -d -t 500 '*:W' 2>/dev/null | sed "s/${CWA_KEY:-no key}/…/g" > "$OUT/android-log.txt" || true
+  fi
+}
+trap finish EXIT
 count() { log | grep -c -- "$1" || true; }
 fail() { echo "$1"; exit 1; }
 # run JavaScript on the open page (passed in base64: the device's shell would split it); its answer goes to the log
@@ -58,6 +69,7 @@ tap 'class="android.widget.EditText"' 60
 sleep 2
 shot 0-key-dialog # (before the key is typed)
 if [ -n "${CWA_KEY:-}" ]; then
+  typing=1
   adb shell input text "$CWA_KEY"
   adb shell input keyevent KEYCODE_BACK # hides the keyboard (the dialog itself stays)
   sleep 1
@@ -76,6 +88,7 @@ if [ -n "${CWA_KEY:-}" ]; then # kept for the next runs? (compared here, never p
   kept=$(adb shell run-as "$PKG" cat shared_prefs/keychain.xml | tr -d '\r' | sed -n 's/.*name="CWA_API_KEY">\([^<]*\)<.*/\1/p')
   [ "$kept" = "$CWA_KEY" ] || fail "the dialog didn't keep the key"
   echo "the dialog kept the key"
+  typing=0 # the dialog is long gone: the page is up
 fi
 sleep 12 # the next-hour card reads the radar images
 shot 1-full-view
