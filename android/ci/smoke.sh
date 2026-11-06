@@ -19,8 +19,9 @@ shot() { adb exec-out screencap -p > "$OUT/$1.png"; }
 log() { adb logcat -d -s TaiwanWeather:* 2>/dev/null || true; }
 stage() { echo "== $(date +%T) $1"; }
 # what the machine and the emulator are doing, every 20 s, for a run that stalls
+alive() { pgrep -f qemu-system > /dev/null; }
 ( while sleep 20; do echo "   $(date +%T) load $(cut -d' ' -f1 /proc/loadavg), $(free -m | awk '/Mem:/{print $7}') MB free," \
-  "emulator $(pgrep -f qemu-system >/dev/null && echo up || echo GONE), adb $(timeout -k 2 8 "$ADB" get-state 2>&1 | tail -1)"; done ) &
+  "adb $(timeout -k 2 8 "$ADB" get-state 2>&1 | tail -1)"; alive || { sudo dmesg 2>/dev/null | tail -8; break; }; done ) &
 watching=$!
 typing=0
 finish() { # the app's log; after a failure, what was on screen and what Android said (public: never the key)
@@ -38,11 +39,11 @@ fail() { echo "$1"; exit 1; }
 # run JavaScript on the open page (passed in base64: the device's shell would split it); its answer goes to the log
 page() { adb shell am broadcast -n "$PKG/.DebugReceiver" -a EVAL --es js64 "$(printf '%s' "$1" | base64 -w0)" > /dev/null; }
 wait_for() { # a line in the app's log, within $2 seconds
-  for _ in $(seq 1 $(( ${2:-60} / 3 ))); do log | grep -- "$1" > /dev/null && return 0; sleep 3; done
+  for _ in $(seq 1 $(( ${2:-60} / 3 ))); do log | grep -- "$1" > /dev/null && return 0; alive || fail "the emulator crashed"; sleep 3; done
   echo "timed out waiting for: $1"; log | tail -40; return 1
 }
 another() { # one more line with $1 in the log than the $2 before, within $3 seconds
-  for _ in $(seq 1 $(( ${3:-60} / 3 ))); do [ "$(count "$1")" -gt "$2" ] && return 0; sleep 3; done
+  for _ in $(seq 1 $(( ${3:-60} / 3 ))); do [ "$(count "$1")" -gt "$2" ] && return 0; alive || fail "the emulator crashed"; sleep 3; done
   echo "timed out waiting for another: $1"; log | tail -40; return 1
 }
 tap() { # the first view on screen whose node in uiautomator's dump matches $1, within $2 seconds
