@@ -57,7 +57,7 @@ jobs:
 
   emulator:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04 # the emulator dies about 100 s into the test on ubuntu-latest's image of 2026-11-01
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -79,11 +79,8 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
-          cores: 4
-          ram-size: 4096M
           disable-animations: true
-          # guest: drawn inside the emulator. Its host-side graphics (swiftshader_indirect) crash on runner image 20261101
-          emulator-options: -no-window -gpu guest -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: bash android/ci/smoke.sh apks/debug/app-debug.apk shots
       - uses: actions/upload-artifact@v4
         if: always()
