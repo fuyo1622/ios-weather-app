@@ -57,8 +57,8 @@ jobs:
 
   emulator:
     needs: build
-    runs-on: ubuntu-22.04 # the emulator dies about 100 s into the test on ubuntu-latest's image of 2026-11-01
-    timeout-minutes: 20
+    runs-on: ubuntu-22.04 # (on ubuntu-latest's image of 2026-11-01 the emulator died in every run)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -71,6 +71,8 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Emulator test (Android 14)
+        id: first
+        continue-on-error: true # (the second try decides)
         uses: reactivecircus/android-emulator-runner@v2
         env:
           CWA_KEY: ${{ secrets.CWA_KEY }}
@@ -82,11 +84,28 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: bash android/ci/smoke.sh apks/debug/app-debug.apk shots
+      # GitHub's machines sometimes lose the emulator itself, about 100 s in, whatever the app (seen since 2026-11-05):
+      # once more on a fresh emulator. A real failure of the app fails both.
+      - name: Emulator test, second try
+        if: steps.first.outcome == 'failure'
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CWA_KEY: ${{ secrets.CWA_KEY }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash android/ci/smoke.sh apks/debug/app-debug.apk shots-second-try
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: emulator
-          path: shots
+          path: |
+            shots
+            shots-second-try
 
   release:
     needs: emulator
@@ -104,4 +123,6 @@ jobs:
           gh release delete android-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
           gh release create android-latest TaiwanWeather.apk --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "Android test build ${GITHUB_RUN_NUMBER}" \
-            --notes "Taiwan Weather for Android, built from ${GITHUB_SHA::7} (branch ${GITHUB_REF_NAME}). On an Android phone (Android 8 or later): open this page, download TaiwanWeather.apk, and allow installing from this source when asked. Each new build installs over the last one."
+            --notes "Taiwan Weather for Android, built from ${GITHUB_SHA::7} (branch ${GITHUB_REF_NAME}). On an Android phone (Android 8 or later): open this page, download TaiwanWeather.apk, and allow installing from this source when asked. Each new build installs over the last one.
+
+          臺灣天氣 Android 版（由 ${GITHUB_SHA::7} 建置）。在 Android 手機（Android 8 以上）上打開本頁，下載 TaiwanWeather.apk，並依提示允許從此來源安裝。每個新版都能直接覆蓋安裝。"

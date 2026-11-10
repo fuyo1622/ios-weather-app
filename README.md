@@ -1,6 +1,8 @@
 # Taiwan Weather (Scriptable widget)
 
-A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store needed.
+English · [繁體中文](README.zh-TW.md)
+
+A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store needed (and on Android, see below).
 
 **How it beats a single forecast**
 1. **CWA 鄉鎮預報** for your district + **7 models** (JMA 5 km MSM, ECMWF IFS 9 km, ECMWF AIFS, ICON, GFS, UKMO, CMA) via Open-Meteo.
@@ -32,7 +34,7 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
 
 **Widgets:** Small shows now, condition, today's high/low and the next rain; Medium adds 8 hours (every 2 h);
 Large shows 24 hours and tomorrow. Lock Screen: temperature and next rain. Active CWA warnings (特報) replace the
-bottom line. Outside Taiwan only the models are used.
+bottom line.
 
 **Next rain** (the widgets' rain line and the hourly card's first sentence): the first hour within 24 hours with a
 20 % chance or more, with its chance (e.g. "Rain ~15:00 (30%)"); when rain becomes likely (50 %+) within 3 hours
@@ -48,7 +50,8 @@ theirs), nothing is downloaded for it, and no notifications are sent. Far from T
 Kinmen and Matsu the geocoder's country decides, since 廈門 is nearer Kinmen's township centres than Taiwan's
 mountains are to theirs. Learning data stays on the phone (not iCloud).
 **Data use:** about 5 KB per widget refresh, plus CWA's full station list (~75 KB) once a week. Opening the full view
-adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour.
+adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour. Playing
+the 降雨雷達 tab adds about 3 MB.
 
 ### Faster learning (optional)
 Widgets ask iOS for a new forecast every 10 minutes, but iOS decides: usually every 15–60 min, depending on its daily budget. The open full view refreshes itself every 5–10 min. The model learns from every run, so more runs means faster calibration. In **Shortcuts → Automation**, add a few "Time of Day" automations (e.g. every 2–3 h) that *Run Script → TaiwanWeather*, set to run immediately.
@@ -118,7 +121,9 @@ Scriptable always shows its own bar (with Close) above a page it presents; its A
   Taiwan; without it, CWA's latest radar image) on a map that stays over Taiwan, Kinmen, Matsu and Lanyu. Its tiles
   are drawn without RainViewer's see-through tan (under 15 dBZ), which on dry days is mostly clutter.
   *CWA rain radar* shows CWA's 降雨雷達 (樹林, 南屯, 林園; every 2 minutes, 150 km around each), nearest first, with
-  your position on it. Its image is about 1 MB, so it loads only when you open the tab.
+  your position on it. Its image is about 1 MB, so it loads only when you open the tab. **Play** replays that
+  radar's last two hours in 10-minute frames, as the moving radar does: CWA's website keeps a few hours of them, and
+  the 13 frames (its 1000 px versions, about 3 MB) load only when you tap Play; Pause goes back to the latest image.
 
 Readings come from the nearest CWA station where it measures them, otherwise from Open-Meteo. OpenStreetMap's tiles
 are free for light personal use with credit; a widely shared copy would need another map provider.
@@ -128,6 +133,7 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
 
 ## Files
 - `TaiwanWeather.js`: the whole app (Scriptable script).
+- `README.zh-TW.md`: this description in Traditional Chinese.
 - `test/harness.mjs`: the tests. They run the script under Node with mocked Scriptable APIs (`test/env.mjs`), on
   fixtures generated from a synthetic "true" weather (including 10 simulated days of learning), then once against live Open-Meteo.
   - `node test/harness.mjs`; with `OFFLINE=1` the live run is skipped.
@@ -169,7 +175,7 @@ allow installing from that source; the first run asks for the CWA key, as on the
 
 ## Toward the iPhone Weather app
 Done: hourly and ten-day forecasts, the detail tiles and a detail sheet behind every card, air quality, CWA warnings,
-an animated radar map and CWA's 降雨雷達, next-hour rain timing, sunrise/sunset, moonrise/moonset and phases, saved
+an animated radar map and CWA's 降雨雷達 with its own replay, next-hour rain timing, sunrise/sunset, moonrise/moonset and phases, saved
 places with swiping, English / 中文, and notifications.
 Next, roughly in order:
 - Taiwan's official air-quality stations (環境部, needs a free API key) instead of the model estimate.

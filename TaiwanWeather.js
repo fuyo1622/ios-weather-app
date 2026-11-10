@@ -652,9 +652,10 @@ async function fetchRainRadarTimes(key) {
     metas[i].cwaopendata.dataset.DateTime]).filter(([, t]) => t));
 }
 
-// The 降雨雷達 images of the last 40 minutes, one every 2 minutes, from the list CWA's website animates (open data
-// has only the latest): { RCSL: [{ time, path }, …], … }, newest first. Their 1000 px versions (about 230 KB) are
-// what the next-hour forecast reads. The list is about 35 KB.
+// The 降雨雷達 images of the last two hours, one every 2 minutes, from the list CWA's website animates (open data
+// has only the latest; the list goes back about 6 hours): { RCSL: [{ time, path }, …], … }, newest first. Their
+// 1000 px versions (about 230 KB) are what the next-hour forecast reads and the 降雨雷達 tab replays. The list is
+// about 190 KB.
 async function fetchRainRadarFrames() {
   const req = new Request(CWA_SITE + "Data/js/obs_img/Observe_radar_rain.js");
   req.timeoutInterval = 10;
@@ -662,19 +663,22 @@ async function fetchRainRadarFrames() {
   for (const [path, code, t] of text.matchAll(/CV1_(RC[A-Z]{2})_1000\/CV1_\1_1000_(\d{14})_\w+\.png/g)) {
     const [y, mo, d, h, mi, s] = [0, 4, 6, 8, 10, 12].map((i, k) => Number(t.slice(i, k ? i + 2 : 4)));
     const time = Date.UTC(y, mo - 1, d, h - 8, mi, s); // Taiwan time
-    if (Date.now() - time < 40 * 60e3) (frames[code] = frames[code] || []).push({ time, path });
+    if (Date.now() - time < 130 * 60e3) (frames[code] = frames[code] || []).push({ time, path });
   }
   if (!Object.keys(frames).length) throw new Error("CWA rain radar: no recent images");
   for (const list of Object.values(frames)) list.sort((a, b) => b.time - a.time);
   return frames;
 }
 
-// Up to three frames about ten minutes apart (within 4 minutes of that, and at least 5 apart), oldest first,
-// ending with the newest: what the next-hour forecast follows the rain through. Fewer if the radar skipped some.
-function pickFrames(list) {
+const REPLAY_BACKS = Array.from({ length: 12 }, (_, i) => (i + 1) * 10); // minutes back: 10, 20, … 120
+
+// Frames about ten minutes apart (within 4 minutes of that, and at least 5 apart), oldest first, ending with the
+// newest: by default three, what the next-hour forecast follows the rain through; [10, 20, … 120] gives the two hours
+// the 降雨雷達 tab replays. Fewer if the radar skipped some.
+function pickFrames(list, backs = [10, 20]) {
   if (!list || !list.length) return [];
   const newest = list[0], picked = [newest];
-  for (const back of [10, 20]) {
+  for (const back of backs) {
     const want = newest.time - back * 60e3;
     const f = list.reduce((best, x) => (Math.abs(x.time - want) < Math.abs(best.time - want) ? x : best));
     if (Math.abs(f.time - want) <= 4 * 60e3 && f.time <= picked[0].time - 5 * 60e3) picked.unshift(f);
@@ -2019,7 +2023,10 @@ function detailHTML(r, ui = {}) {
   // CWA's 降雨雷達 as a second tab, nearest radar first; its image (about 1 MB) loads only when opened.
   const rainRadars = r.loc ? RAIN_RADARS.map((s) => ({ name: s.name, km: distanceKm(r.loc, s), px: rainRadarPixel(s, r.loc),
     url: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/${s.id}.png`,
-    time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16) })).sort((a, b) => a.km - b.km) : [];
+    time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16),
+    // its Play: the last two hours, ten minutes apart, from CWA's website (1000 px frames of the same picture)
+    replay: pickFrames((r.rainFrames || {})[s.code], REPLAY_BACKS).map((f) => ({ url: CWA_SITE + "Data/radar_rain/" + f.path,
+      time: hm(((f.time / 60000) + 8 * 60) % 1440) })) })).sort((a, b) => a.km - b.km) : [];
   const radar = mapSource && r.loc ? card(`🛰️ ${w.radar}`,
     // full screen (its icon drawn here rather than a font's arrow, so it shows the same everywhere), and back
     `<button type="button" class="expand" id="map-full" aria-label="${w.d.full}"><svg viewBox="0 0 20 20" width="16" height="16" ` +
@@ -2030,7 +2037,8 @@ function detailHTML(r, ui = {}) {
     `<button type="button" data-tab="cwa">${w.radarTabs[1]}</button></div><div id="map"></div>` +
     `<div id="cwa-view" hidden><div class="tabs" id="stations">${rainRadars.map((s, i) =>
       `<button type="button" data-i="${i}"${i ? "" : ' class="on"'}>${s.name}</button>`).join("")}</div>` +
-    `<div id="cwa-map"></div><p class="note" id="cwa-note">${esc(w.cwaRadarNote(rainRadars[0].name, rainRadars[0].time))}</p></div>` +
+    `<div id="cwa-map"></div><p class="note"><button id="cwa-play" type="button"${rainRadars[0].replay.length > 1 ? "" : " hidden"}>` +
+    `▶︎ ${w.play}</button><span id="cwa-note">${esc(w.cwaRadarNote(rainRadars[0].name, rainRadars[0].time))}</span></p></div>` +
     `<p class="note" id="radar-note">` + (frames.length ? `<button id="play" type="button">▶︎ ${w.play}</button> ` : "") +
     `<span id="radar-time">${esc(w.radarNote(frames.length ? "RainViewer" : w.radar, frames.length ? frames[frames.length - 1].time : cwaRadar.time))}</span></p>`,
     "radar") : "";
@@ -2118,8 +2126,8 @@ h2, h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04
 .arrow { display: inline-block; font-style: normal; margin-right: 6px; }
 #map { height: 280px; border-radius: 10px; background: #1b2433; }
 [class*="-night"] #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); } /* dark map at night */
-#play { font: 600 13px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255, 255, 255, .2); border: 0;
-  border-radius: 12px; padding: 4px 10px; margin-right: 6px; }
+#play, #cwa-play { font: 600 13px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255, 255, 255, .2);
+  border: 0; border-radius: 12px; padding: 4px 10px; margin-right: 6px; flex: none; }
 .note, .nh-note, footer { color: var(--dim); font-size: 12px; } .note { margin: 8px 0 0; display: flex; align-items: center; }
 .nh-note { margin: 8px 0 0; }
 .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 6px 0; font-size: 15px; }
@@ -2317,6 +2325,8 @@ ${radar ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/lea
 const here = [${r.loc.latitude}, ${r.loc.longitude}], frames = ${JSON.stringify(frames)}, cwa = ${JSON.stringify(cwaRadar)};
 const note = ${JSON.stringify(frames.map((f) => w.radarNote("RainViewer", f.time)))};
 const rainRadars = ${JSON.stringify(rainRadars)}, cwaNotes = ${JSON.stringify(rainRadars.map((s) => w.cwaRadarNote(s.name, s.time)))};
+const replayNotes = ${JSON.stringify(rainRadars.map((s) => s.replay.map((f) => w.cwaRadarNote(s.name, f.time))))};
+const playLabel = ${JSON.stringify("▶︎ " + w.play)}, pauseLabel = ${JSON.stringify("❚❚ " + w.pause)};
 const TAIWAN = [[20.6, 117.6], [27.0, 123.4]]; // Taiwan with Kinmen, Matsu and Lanyu: the map can't wander off
 // The map starts once the page has loaded, so its tiles don't hold up the page, or the next swipe.
 addEventListener("load", () => {
@@ -2324,6 +2334,7 @@ if (window.L) {
   const map = L.map("map", { zoomControl: false, minZoom: 7, maxBounds: TAIWAN, maxBoundsViscosity: 1 }).setView(here, 8);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", // free for light personal use, with credit
     { minZoom: 7, maxZoom: 12, attribution: "© OpenStreetMap contributors" }).addTo(map);
+  let stopMoving = () => {};
   if (frames.length) {
     // Radar in its own pane, so the night filter on the base map leaves its colours alone. Every frame
     // loads at once (hidden), so the animation doesn't wait for tiles. Each tile goes through a canvas that drops
@@ -2355,10 +2366,11 @@ if (window.L) {
     show(shown);
     button.addEventListener("click", () => {
       document.body.classList.toggle("playing", !timer);
-      if (timer) { clearInterval(timer); timer = null; show(layers.length - 1); button.textContent = ${JSON.stringify("▶︎ " + w.play)}; return; }
+      if (timer) { clearInterval(timer); timer = null; show(layers.length - 1); button.textContent = playLabel; return; }
       timer = setInterval(() => show((shown + 1) % layers.length), 700);
-      button.textContent = ${JSON.stringify("❚❚ " + w.pause)};
+      button.textContent = pauseLabel;
     });
+    stopMoving = () => { if (timer) button.click(); };
   } else if (cwa) {
     L.imageOverlay(cwa.url + "?t=" + Date.now(), cwa.bounds, { opacity: 0.8 }).addTo(map);
   }
@@ -2371,16 +2383,47 @@ if (window.L) {
   document.getElementById("map-full").addEventListener("click", () => fullScreen(true));
   document.getElementById("map-back").addEventListener("click", () => fullScreen(false));
 
-  // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it.
-  let cwaMap = null;
+  // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it. Play
+  // replays its last two hours, as the moving radar does (the frames load only then), and stops on the latest image.
+  let cwaMap = null, latest = null, latestUrl = "", cwaTimer = null, station = 0;
+  const cwaPlay = document.getElementById("cwa-play"), cwaNote = document.getElementById("cwa-note");
+  const box = [[-3600, 0], [0, 3600]]; // image pixels, y pointing down; the 1000 px frames are the same picture
+  const stopReplay = () => {
+    if (!cwaTimer) return;
+    clearInterval(cwaTimer); cwaTimer = null;
+    latest.setUrl(latestUrl);
+    cwaNote.textContent = cwaNotes[station];
+    cwaPlay.textContent = playLabel;
+    document.body.classList.remove("playing");
+  };
+  cwaPlay.addEventListener("click", () => {
+    if (cwaTimer) return stopReplay();
+    const list = rainRadars[station].replay, notes = replayNotes[station];
+    const images = list.map((f) => { const img = new Image(); img.src = f.url; return img; }); // all at once
+    let k = 0;
+    const step = () => { // the next frame, oldest to newest and round again; one still loading is waited for
+      const img = images[k];
+      if (!img.complete) return;
+      if (img.naturalWidth) { latest.setUrl(img.src); cwaNote.textContent = notes[k]; } // (one that failed is skipped)
+      k = (k + 1) % list.length;
+    };
+    document.body.classList.add("playing");
+    cwaPlay.textContent = pauseLabel;
+    cwaTimer = setInterval(step, 700);
+    step();
+  });
   const showStation = (i) => {
+    stopReplay();
+    station = i;
     document.querySelectorAll("#stations [data-i]").forEach((b) => b.classList.toggle("on", Number(b.dataset.i) === i));
-    document.getElementById("cwa-note").textContent = cwaNotes[i];
+    cwaNote.textContent = cwaNotes[i];
     if (cwaMap) cwaMap.remove();
-    const s = rainRadars[i], box = [[-3600, 0], [0, 3600]]; // image pixels, y pointing down
+    const s = rainRadars[i];
+    cwaPlay.hidden = s.replay.length < 2;
     cwaMap = L.map("cwa-map", { crs: L.CRS.Simple, zoomControl: false, attributionControl: false, zoomSnap: 0.25,
       maxBounds: box, maxBoundsViscosity: 1, minZoom: -6, maxZoom: 1 }); // negative zoom: the image is 3600 px
-    L.imageOverlay(s.url + "?t=" + Date.now(), box).addTo(cwaMap);
+    latestUrl = s.url + "?t=" + Date.now();
+    latest = L.imageOverlay(latestUrl, box).addTo(cwaMap);
     cwaMap.fitBounds(box);
     cwaMap.setMinZoom(cwaMap.getZoom());
     const [x, y] = s.px;
@@ -2391,6 +2434,8 @@ if (window.L) {
   };
   document.querySelectorAll("[data-tab]").forEach((tab) => tab.addEventListener("click", () => {
     const cwaTab = tab.dataset.tab === "cwa";
+    stopMoving(); // (neither plays on in a hidden tab)
+    stopReplay();
     document.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("on", t === tab));
     document.getElementById("map").hidden = cwaTab;
     document.getElementById("radar-note").hidden = cwaTab;

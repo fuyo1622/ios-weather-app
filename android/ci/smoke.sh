@@ -116,6 +116,18 @@ stage "radar"
 shot 4-radar
 stage "radar photographed"
 
+stage "降雨雷達: Play"
+page "document.querySelector('[data-tab=cwa]').click(); 'opened the 降雨雷達 tab'"
+sleep 4
+page "document.getElementById('cwa-play').hidden ? 'no Play' : (document.getElementById('cwa-play').click(), 'tapped Play')"
+for _ in $(seq 1 8); do # its frames come from CWA's website, in Taiwan
+  sleep 3
+  page "document.querySelector('#cwa-map img.leaflet-image-layer').src.includes('/radar_rain/') ? '降雨雷達 replaying' : 'waiting'"
+  log | grep 'eval: "降雨雷達 replaying"' > /dev/null && break
+done
+shot 4b-rain-radar-replay
+page "document.getElementById('cwa-play').click(); document.querySelector('[data-tab=move]').click(); 'back to the moving radar'"
+
 stage "links: Send a test, then 中文"
 # The page's links go to the script (tw-weather://): Send a test (a notification now, one more from the widgets'
 # next refresh), then 中文.
@@ -194,6 +206,7 @@ grep -q "widget data for 'My Location': {\"place\"" "$OUT/logcat.txt" || fail "n
 grep -q 'eval: "no internet said once"' "$OUT/logcat.txt" || fail "with no internet, the page didn't say so once in its own words"
 grep -q "widget data for 'My Location': .*\"outside\":true" "$OUT/logcat.txt" || fail "abroad, the widget didn't say outside Taiwan"
 grep -q 'eval: "page outside Taiwan"' "$OUT/logcat.txt" || fail "abroad, the page didn't say outside Taiwan"
+grep -q 'eval: "降雨雷達 replaying"' "$OUT/logcat.txt" || fail "the 降雨雷達 tab didn't replay"
 if grep -E "Uncaught|TypeError|ReferenceError|SyntaxError|TaiwanWeather.js stopped" "$OUT/logcat.txt"; then fail "script errors above"; fi
 grep -E 'eval: "|widget data for' "$OUT/logcat.txt" | cut -c1-400
 echo "emulator test passed"
