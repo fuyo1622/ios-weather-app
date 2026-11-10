@@ -652,7 +652,7 @@ async function fetchRainRadarTimes(key) {
     metas[i].cwaopendata.dataset.DateTime]).filter(([, t]) => t));
 }
 
-// The 降雨雷達 images of the last two hours, one every 2 minutes, from the list CWA's website animates (open data
+// The 降雨雷達 images of the last 40 minutes, one every 2 minutes, from the list CWA's website animates (open data
 // has only the latest; the list goes back about 6 hours): { RCSL: [{ time, path }, …], … }, newest first. Their
 // 1000 px versions (about 230 KB) are what the next-hour forecast reads and the 降雨雷達 tab replays. The list is
 // about 190 KB.
@@ -663,22 +663,25 @@ async function fetchRainRadarFrames() {
   for (const [path, code, t] of text.matchAll(/CV1_(RC[A-Z]{2})_1000\/CV1_\1_1000_(\d{14})_\w+\.png/g)) {
     const [y, mo, d, h, mi, s] = [0, 4, 6, 8, 10, 12].map((i, k) => Number(t.slice(i, k ? i + 2 : 4)));
     const time = Date.UTC(y, mo - 1, d, h - 8, mi, s); // Taiwan time
-    if (Date.now() - time < 130 * 60e3) (frames[code] = frames[code] || []).push({ time, path });
+    if (Date.now() - time < 40 * 60e3) (frames[code] = frames[code] || []).push({ time, path });
   }
   if (!Object.keys(frames).length) throw new Error("CWA rain radar: no recent images");
   for (const list of Object.values(frames)) list.sort((a, b) => b.time - a.time);
   return frames;
 }
 
-const REPLAY_BACKS = Array.from({ length: 12 }, (_, i) => (i + 1) * 10); // minutes back: 10, 20, … 120
+// The 降雨雷達 tab's Play: every image of the last 30 minutes (about one every 2 minutes, so the rain moves smoothly),
+// oldest first.
+function replayFrames(list, minutes = 30) {
+  return list ? list.filter((f) => list[0].time - f.time <= minutes * 60e3).reverse() : [];
+}
 
-// Frames about ten minutes apart (within 4 minutes of that, and at least 5 apart), oldest first, ending with the
-// newest: by default three, what the next-hour forecast follows the rain through; [10, 20, … 120] gives the two hours
-// the 降雨雷達 tab replays. Fewer if the radar skipped some.
-function pickFrames(list, backs = [10, 20]) {
+// Up to three frames about ten minutes apart (within 4 minutes of that, and at least 5 apart), oldest first,
+// ending with the newest: what the next-hour forecast follows the rain through. Fewer if the radar skipped some.
+function pickFrames(list) {
   if (!list || !list.length) return [];
   const newest = list[0], picked = [newest];
-  for (const back of backs) {
+  for (const back of [10, 20]) {
     const want = newest.time - back * 60e3;
     const f = list.reduce((best, x) => (Math.abs(x.time - want) < Math.abs(best.time - want) ? x : best));
     if (Math.abs(f.time - want) <= 4 * 60e3 && f.time <= picked[0].time - 5 * 60e3) picked.unshift(f);
@@ -2024,8 +2027,8 @@ function detailHTML(r, ui = {}) {
   const rainRadars = r.loc ? RAIN_RADARS.map((s) => ({ name: s.name, km: distanceKm(r.loc, s), px: rainRadarPixel(s, r.loc),
     url: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/${s.id}.png`,
     time: String((r.rainRadarTimes || {})[s.id] || "").slice(11, 16),
-    // its Play: the last two hours, ten minutes apart, from CWA's website (1000 px frames of the same picture)
-    replay: pickFrames((r.rainFrames || {})[s.code], REPLAY_BACKS).map((f) => ({ url: CWA_SITE + "Data/radar_rain/" + f.path,
+    // its Play: every image of the last 30 minutes, from CWA's website (1000 px frames of the same picture)
+    replay: replayFrames((r.rainFrames || {})[s.code]).map((f) => ({ url: CWA_SITE + "Data/radar_rain/" + f.path,
       time: hm(((f.time / 60000) + 8 * 60) % 1440) })) })).sort((a, b) => a.km - b.km) : [];
   const radar = mapSource && r.loc ? card(`🛰️ ${w.radar}`,
     // full screen (its icon drawn here rather than a font's arrow, so it shows the same everywhere), and back
@@ -2384,7 +2387,8 @@ if (window.L) {
   document.getElementById("map-back").addEventListener("click", () => fullScreen(false));
 
   // The CWA 降雨雷達 tab: one radar's image, zoomable but kept inside the image, with your position on it. Play
-  // replays its last two hours, as the moving radar does (the frames load only then), and stops on the latest image.
+  // replays its last 30 minutes, as the moving radar does its two hours (the frames load only then), and stops on the
+  // latest image.
   let cwaMap = null, latest = null, latestUrl = "", cwaTimer = null, station = 0;
   const cwaPlay = document.getElementById("cwa-play"), cwaNote = document.getElementById("cwa-note");
   const box = [[-3600, 0], [0, 3600]]; // image pixels, y pointing down; the 1000 px frames are the same picture
@@ -2400,16 +2404,18 @@ if (window.L) {
     if (cwaTimer) return stopReplay();
     const list = rainRadars[station].replay, notes = replayNotes[station];
     const images = list.map((f) => { const img = new Image(); img.src = f.url; return img; }); // all at once
-    let k = 0;
+    let k = 0, hold = 0;
     const step = () => { // the next frame, oldest to newest and round again; one still loading is waited for
+      if (hold > 0) { hold--; return; } // a moment on the newest before going round
       const img = images[k];
       if (!img.complete) return;
       if (img.naturalWidth) { latest.setUrl(img.src); cwaNote.textContent = notes[k]; } // (one that failed is skipped)
+      if (k === list.length - 1) hold = 4;
       k = (k + 1) % list.length;
     };
     document.body.classList.add("playing");
     cwaPlay.textContent = pauseLabel;
-    cwaTimer = setInterval(step, 700);
+    cwaTimer = setInterval(step, 300); // its images are 2 minutes apart: quicker than the moving radar's 10
     step();
   });
   const showStation = (i) => {

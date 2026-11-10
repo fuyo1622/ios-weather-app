@@ -292,12 +292,12 @@ await test("CWA 降雨雷達 colours: its colour bar reads back as 0–65 dBZ; s
   assert.deepEqual([shaded.dbz[0], shaded.blind[0]], [15, 1]);
 });
 
-await test("降雨雷達 frames: the website's list of the last two hours; three frames about 10 minutes apart are picked", async () => {
+await test("降雨雷達 frames: the website's list of the last 40 minutes; three frames about 10 minutes apart are picked", async () => {
   reset({ at: E.tw("2026-10-27T19:23") });
   const frames = await W.fetchRainRadarFrames();
   assert.deepEqual(Object.keys(frames).sort(), ["RCLY", "RCNT", "RCSL"]);
   for (const list of Object.values(frames)) {
-    assert.ok(list.length >= 59 && list.length <= 61, "two hours at 2-minute steps: " + list.length);
+    assert.ok(list.length >= 19 && list.length <= 21, "40 minutes at 2-minute steps: " + list.length);
     assert.ok(list.every((f, i) => !i || f.time < list[i - 1].time), "newest first");
     assert.ok(list.every((f) => /^CV1_RC[A-Z]{2}_1000\/CV1_RC[A-Z]{2}_1000_\d{14}_[0-9a-f]+\.png$/.test(f.path)), list[0].path);
   }
@@ -308,11 +308,11 @@ await test("降雨雷達 frames: the website's list of the last two hours; three
   assert.equal(picked.length, 3);
   assert.equal(picked[2], frames.RCSL[0]);
   assert.ok(gaps.every((m) => m >= 7 && m <= 13), JSON.stringify(gaps));
-  // the 降雨雷達 tab's replay: two hours, ten minutes apart, oldest first, ending with the newest
-  const replay = W.pickFrames(frames.RCSL, Array.from({ length: 12 }, (_, i) => (i + 1) * 10));
-  const steps = replay.slice(1).map((f, i) => (f.time - replay[i].time) / 60e3);
-  assert.deepEqual([replay.length, replay.at(-1)], [13, frames.RCSL[0]]);
-  assert.ok(steps.every((m) => m >= 7 && m <= 13), JSON.stringify(steps));
+  // the 降雨雷達 tab's replay: every image of the last 30 minutes, oldest first, ending with the newest
+  const replay = W.replayFrames(frames.RCSL), steps = replay.slice(1).map((f, i) => (f.time - replay[i].time) / 60e3);
+  assert.ok(replay.length >= 14 && replay.length <= 16 && replay.at(-1) === frames.RCSL[0], replay.length);
+  assert.ok(steps.every((m) => m > 1 && m < 3) && frames.RCSL[0].time - replay[0].time <= 30 * 60e3, JSON.stringify(steps));
+  assert.deepEqual([W.replayFrames(undefined), W.replayFrames([])], [[], []]);
   // the radar skipped 15–25 minutes ago: only the newest and the one about 10 minutes before it
   reset({ at: E.tw("2026-10-27T19:23") });
   E.net.rainRadarGap = [15, 25];
@@ -1171,18 +1171,19 @@ await test("radar card: the map stays over Taiwan; CWA 降雨雷達 tab, nearest
   assert.ok(E.env.html.includes("CWA rain radar at 樹林 13:08, every 2 minutes"), "the radar image's time");
   assert.ok(E.env.html.includes('data-tab="cwa"') && E.env.html.includes("O-A0084-001.png"));
   assert.ok(E.env.html.includes("minZoom: 7, maxBounds: TAIWAN") && E.env.html.includes("[[20.6, 117.6], [27.0, 123.4]]"));
-  // its Play, as the moving radar's: each radar's last two hours from CWA's website, ten minutes apart, with their times
+  // its Play: each radar's images of the last 30 minutes from CWA's website, about 2 minutes apart, with their times
   const radars = JSON.parse(E.env.html.match(/const rainRadars = (\[.*?\]), cwaNotes = /)[1]);
   const minutes = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
   for (const s of radars) {
     const code = W.RAIN_RADARS.find((x) => x.name === s.name).code, gaps = s.replay.slice(1).map((f, i) => minutes(f.time) - minutes(s.replay[i].time));
-    assert.equal(s.replay.length, 13, s.name);
-    assert.ok(gaps.every((m) => m >= 7 && m <= 13), s.name + " " + JSON.stringify(gaps));
+    assert.ok(s.replay.length >= 14 && s.replay.length <= 16, s.name + " " + s.replay.length);
+    assert.ok(gaps.every((m) => m >= 1 && m <= 3), s.name + " " + JSON.stringify(gaps));
     assert.ok(s.replay.every((f) => f.url.startsWith(`${W.CWA_SITE}Data/radar_rain/CV1_${code}_1000/`)), s.replay[0].url);
   }
   assert.ok(/<button id="cwa-play" type="button">▶︎ Play<\/button>/.test(E.env.html), "a Play button in the 降雨雷達 tab");
-  const notes = JSON.parse(E.env.html.match(/const replayNotes = (\[.*\]);/)[1]);
-  assert.equal(notes[0][12], `CWA rain radar at 樹林 ${radars[0].replay[12].time}, every 2 minutes · the blue dot is you`);
+  const notes = JSON.parse(E.env.html.match(/const replayNotes = (\[.*\]);/)[1]), last = radars[0].replay.length - 1;
+  assert.equal(notes[0][last], `CWA rain radar at 樹林 ${radars[0].replay[last].time}, every 2 minutes · the blue dot is you`);
+  assert.ok(E.env.html.includes("setInterval(step, 300)"), "quicker than the moving radar, its images being 2 minutes apart");
   reset({ at: E.tw("2026-10-02T13:20") }); // without CWA's website: the latest image alone, no Play
   E.keychain.set("CWA_API_KEY", "KEY");
   E.net.cwaSite = "down";

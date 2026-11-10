@@ -51,7 +51,7 @@ Kinmen and Matsu the geocoder's country decides, since 廈門 is nearer Kinmen's
 mountains are to theirs. Learning data stays on the phone (not iCloud).
 **Data use:** about 5 KB per widget refresh, plus CWA's full station list (~75 KB) once a week. Opening the full view
 adds about 1 MB: the map, the radar images, and three 降雨雷達 images (about 250 KB each) for the next hour. Playing
-the 降雨雷達 tab adds about 3 MB.
+the 降雨雷達 tab adds about 4 MB.
 
 ### Faster learning (optional)
 Widgets ask iOS for a new forecast every 10 minutes, but iOS decides: usually every 15–60 min, depending on its daily budget. The open full view refreshes itself every 5–10 min. The model learns from every run, so more runs means faster calibration. In **Shortcuts → Automation**, add a few "Time of Day" automations (e.g. every 2–3 h) that *Run Script → TaiwanWeather*, set to run immediately.
@@ -121,9 +121,10 @@ Scriptable always shows its own bar (with Close) above a page it presents; its A
   Taiwan; without it, CWA's latest radar image) on a map that stays over Taiwan, Kinmen, Matsu and Lanyu. Its tiles
   are drawn without RainViewer's see-through tan (under 15 dBZ), which on dry days is mostly clutter.
   *CWA rain radar* shows CWA's 降雨雷達 (樹林, 南屯, 林園; every 2 minutes, 150 km around each), nearest first, with
-  your position on it. Its image is about 1 MB, so it loads only when you open the tab. **Play** replays that
-  radar's last two hours in 10-minute frames, as the moving radar does: CWA's website keeps a few hours of them, and
-  the 13 frames (its 1000 px versions, about 3 MB) load only when you tap Play; Pause goes back to the latest image.
+  your position on it. Its image is about 1 MB, so it loads only when you open the tab. **Play** replays every image
+  of that radar's last 30 minutes (about one every 2 minutes, so the rain moves smoothly, where the moving radar has
+  one every 10): the 1000 px versions from CWA's website, about 4 MB, load only when you tap Play, and Pause goes back
+  to the latest image.
 
 Readings come from the nearest CWA station where it measures them, otherwise from Open-Meteo. OpenStreetMap's tiles
 are free for light personal use with credit; a widely shared copy would need another map provider.

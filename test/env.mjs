@@ -443,7 +443,7 @@ export async function loadScript() {
     " nearestStation, nearestTown, TOWN_POINTS, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
     " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook, findPlace, setLang, WORDS," +
     " nowcastFrom, rainRadarPixel, RAIN_RADARS, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
-    " placeholderHTML, fetchRainRadarFrames, pickFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence, detailHours, detailPage, moonTimes, moonAltitude," +
+    " placeholderHTML, fetchRainRadarFrames, pickFrames, replayFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence, detailHours, detailPage, moonTimes, moonAltitude," +
     " sunElevation, windDegrees, fetchWarningTexts, fetchAir, fetchExtras };";
   const factory = new AsyncFunction(...Object.keys(globals), src + exportsLine);
   return factory(...Object.values(globals));
