@@ -695,6 +695,59 @@ await test("no internet in the mountains (武陵農場, 35 km from a township ce
   assert.equal((await W.run(null)).outside, undefined);
 });
 
+await test("📌 pin on the map: the spot is saved with its township (the geocoder's) and forecast at the pin", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  assert.ok(['id="pin-open"', 'id="pin-map"', 'id="pin-add"', "📌 Pin on the map"].every((s) => E.env.html.includes(s)), "in ＋ Add");
+  const towns = JSON.parse(E.env.html.match(/const towns = (\[\[.*?\]\]);/)[1]);
+  assert.equal(towns.length, 368, "the townships' centres, to name the pin's");
+  assert.deepEqual(towns.find(([n]) => n === "臺北市中山區"), ["臺北市中山區", ...[W.findPlace("臺北市中山區")].map((t) => [+t.latitude.toFixed(3), +t.longitude.toFixed(3)])[0]]);
+  // in 中山區 but nearer 大同區's centre: the geocoder decides the township; the models and station go by the pin
+  E.env.geocode = () => [{ isoCountryCode: "TW", country: "台灣", administrativeArea: "台北市", subLocality: "中山區" }];
+  E.net.log.length = 0;
+  await E.tap("tw-weather://add?lat=25.06750&lon=121.51200");
+  const saved = () => JSON.parse(fs.readFileSync(E.settingsFile, "utf8")).places;
+  assert.deepEqual(saved(), [{ county: "臺北市", name: "中山區", latitude: 25.0675, longitude: 121.512 }]);
+  assert.ok(E.env.html.includes(">臺北市中山區 📌</a>") && E.env.html.includes("pinned on the map"), "its chip and where it's from");
+  assert.ok(E.net.log.some((u) => u.includes("api.open-meteo.com") && u.includes("latitude=25.0675&longitude=121.5120")), "models at the pin");
+  assert.ok(E.net.log.some((u) => u.includes("F-D0047-061") && u.includes(encodeURIComponent("中山區"))), "CWA's 中山區 forecast");
+  assert.ok(fs.existsSync(E.placeFile("臺北市中山區@25.067,121.512")), "its own learning, apart from the township's centre");
+  await E.tap("tw-weather://add?lat=25.06760&lon=121.51210"); // the same spot again (11 m away): no second one
+  assert.equal(saved().length, 1);
+  await E.tap("tw-weather://add?place=" + encodeURIComponent("臺北市中山區")); // the township's centre is another place
+  assert.deepEqual(saved().map((p) => p.latitude ?? "centre"), [25.0675, "centre"]);
+  await E.tap("tw-weather://remove?place=0");
+  assert.deepEqual(saved(), [{ county: "臺北市", name: "中山區" }]);
+});
+
+await test("📌 a spot outside Taiwan isn't added, and the page says why", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  E.setConfig({ runsInApp: true });
+  await W.main();
+  E.env.geocode = () => [{ isoCountryCode: "CN", country: "中國", administrativeArea: "福建省", locality: "廈門市" }];
+  await E.tap("tw-weather://add?lat=24.48000&lon=118.12000"); // 廈門, near Kinmen: the geocoder's country
+  await E.tap("tw-weather://add?lat=24.47000&lon=123.00000"); // 與那國島: far from every township
+  assert.ok(!fs.existsSync(E.settingsFile) || JSON.parse(fs.readFileSync(E.settingsFile, "utf8")).places.length === 0, "nothing saved");
+  assert.ok(E.env.html.includes("That spot is outside Taiwan: CWA's forecasts cover Taiwan, Penghu, Kinmen and Matsu."));
+});
+
+await test("📌 a widget named for the township of a pinned spot shows the pin's forecast", async () => {
+  reset({ at: E.tw("2026-10-02T13:20") });
+  E.keychain.set("CWA_API_KEY", "KEY");
+  fs.mkdirSync(path.dirname(E.settingsFile), { recursive: true });
+  fs.writeFileSync(E.settingsFile, JSON.stringify({ places: [{ county: "花蓮縣", name: "秀林鄉", latitude: 24.159, longitude: 121.621 }] }));
+  E.scriptArgs.widgetParameter = "秀林鄉";
+  E.setConfig({ runsInWidget: true, widgetFamily: "small" });
+  await W.main();
+  assert.ok(E.texts(E.env.widget).includes("花蓮縣秀林鄉"));
+  assert.ok(E.net.log.some((u) => u.includes("api.open-meteo.com") && u.includes("latitude=24.1590&longitude=121.6210")), "at the pin");
+  assert.equal(E.env.widget.url, "scriptable:///run/TaiwanWeather?place=" + encodeURIComponent("花蓮縣秀林鄉"), "a tap opens it");
+  assert.deepEqual(W.savedPlace({ county: "花蓮縣", name: "秀林鄉" }).latitude, 24.1206, "a township alone: its centre");
+});
+
 await test("language: the page changes at once and stays where it was; the widgets follow at their next refresh, and it says so", async () => {
   reset({ at: E.tw("2026-10-02T13:20") });
   E.keychain.set("CWA_API_KEY", "KEY");

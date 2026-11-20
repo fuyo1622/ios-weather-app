@@ -276,8 +276,10 @@ function jsonFile(name) {
     save(data) { fm.writeString(file, JSON.stringify(data)); },
   };
 }
-// Forecast and learning state: one file for My Location, one per saved place, so each learns its own errors.
-const storage = (place) => jsonFile(place ? `place-${place.county}${place.name}.json` : "state.json");
+// Forecast and learning state: one file for My Location, one per saved place, so each learns its own errors. A spot
+// pinned on the map is a place of its own, apart from its township's centre: "臺北市信義區@25.042,121.565".
+const placeKey = (p) => p.county + p.name + (p.pin ? `@${p.latitude.toFixed(3)},${p.longitude.toFixed(3)}` : "");
+const storage = (place) => jsonFile(place ? `place-${placeKey(place)}.json` : "state.json");
 
 // Settings shared by the widgets and the full view.
 const DEFAULT_SETTINGS = { lang: "en", places: [], notify: { rain: true, warnings: true } };
@@ -422,21 +424,35 @@ function nearestTown(loc) {
 async function findTown(loc, state) {
   const last = state.place;
   if (last && (last.via === "apple" || last.country) && distanceKm(loc, last) < 1) return last;
-  let match = null, country = null;
-  try {
-    const marks = (await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [];
-    const names = marks.flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
-    match = TOWN_POINTS.find((t) => names.includes(t.county) && names.includes(t.name));
-    // Taiwan by its code, or by name where a map files it under another country; at sea, the Taiwan Strait
-    const taiwan = (p) => p.isoCountryCode === "TW" ||
-      /[台臺][灣湾]|Taiwan/i.test([p.country, p.administrativeArea, p.ocean].filter(Boolean).join(" "));
-    const coded = marks.find((p) => p.isoCountryCode);
-    country = match || marks.some(taiwan) ? "TW" : coded ? coded.isoCountryCode : null;
-  } catch (e) { /* offline or no answer: use the nearest centre */ }
+  const { match, country } = await geocodeTown(loc);
   const town = match ? { ...match, via: "apple" } : { ...nearestTown(loc), via: "nearest" };
   state.place = { county: town.county, name: town.name, via: town.via, country, distance: distanceKm(loc, town),
     latitude: loc.latitude, longitude: loc.longitude };
   return state.place;
+}
+
+// What the geocoder says of loc: the CWA township its names match (or null), and its country ("TW", another code,
+// or null without an answer).
+async function geocodeTown(loc) {
+  try {
+    const marks = (await within(Location.reverseGeocode(loc.latitude, loc.longitude, "zh_TW"), CONFIG.locationWaitMs)) || [];
+    const names = marks.flatMap((p) => Object.values(p)).filter((v) => typeof v === "string").map((v) => v.replace(/台/g, "臺"));
+    const match = TOWN_POINTS.find((t) => names.includes(t.county) && names.includes(t.name)) || null;
+    // Taiwan by its code, or by name where a map files it under another country; at sea, the Taiwan Strait
+    const taiwan = (p) => p.isoCountryCode === "TW" ||
+      /[台臺][灣湾]|Taiwan/i.test([p.country, p.administrativeArea, p.ocean].filter(Boolean).join(" "));
+    const coded = marks.find((p) => p.isoCountryCode);
+    return { match, country: match || marks.some(taiwan) ? "TW" : coded ? coded.isoCountryCode : null };
+  } catch (e) {
+    return { match: null, country: null }; // offline or no answer: the nearest centre will do
+  }
+}
+
+// The township of a spot pinned on the map, as for My Location; null outside Taiwan.
+async function townAt(loc) {
+  if (nearestTown(loc).distance > CONFIG.taiwanReachKm) return null;
+  const { match, country } = await geocodeTown(loc);
+  return country && country !== "TW" ? null : match || nearestTown(loc);
 }
 
 // Expand a CWA WeatherElement into hourly values.
@@ -1147,7 +1163,7 @@ async function run(apiKey, opts = {}) {
   const modelsReq = Promise.allSettled([fetchModels(loc)]);
   const [stationsRes, townRes] = await Promise.allSettled([
     apiKey ? getStations(apiKey, state, loc) : Promise.reject(new Error("No CWA key")),
-    pinned ? { ...pinned, via: "saved", distance: 0 } : findTown(loc, state),
+    pinned ? { ...pinned, via: pinned.pin ? "pin" : "saved", distance: 0 } : findTown(loc, state),
   ]);
 
   // Outside Taiwan, My Location shows no forecast. It is where the geocoder names another country (Kinmen and Matsu
@@ -1302,10 +1318,14 @@ const WORDS = {
     unknownPlace: (p) => `Unknown place "${p}". Use a township, e.g. 臺南市東區.`,
     net: { offline: "No internet connection.", timeout: "The connection timed out." },
     widgetsFollow: "Widgets change language at their next refresh. iOS decides when, usually within 20 minutes.",
+    pinOnMap: "Pin on the map", pinHint: "Move the map to put the pin on the spot.", pinAdd: "Add this spot",
+    pinOutside: "That spot is outside Taiwan: CWA's forecasts cover Taiwan, Penghu, Kinmen and Matsu.",
+    pinOutsideShort: "Outside Taiwan: no forecast here",
     outside: "Outside Taiwan", outsideShort: "No forecast here",
     outsideNote: "There's no forecast for where you are: CWA's township forecasts cover Taiwan, Penghu, Kinmen and " +
       "Matsu. Places you've saved still have theirs, and ＋ Add finds more.",
-    via: { apple: "township from Apple Maps", nearest: "township from the nearest township centre", saved: "saved place" },
+    via: { apple: "township from Apple Maps", nearest: "township from the nearest township centre", saved: "saved place",
+      pin: "pinned on the map" },
     station: (name, km) => `station ${name} ${km} km`, staleBanner: "Showing the last forecast.", until: (t) => `until ${t}`,
     noRain24: "No rain expected in the next 24 hours.", rainNowLong: (p) => `Rain now (${p}).`,
     rainAtLong: (tmrw, t, p) => `Rain likely ${tmrw ? "tomorrow " : ""}around ${t} (${p}).`,
@@ -1427,9 +1447,11 @@ so sources that keep missing here lose weight. Temperature error (°C) per sourc
     unknownPlace: (p) => `找不到「${p}」。請輸入鄉鎮市區，例如 臺南市東區。`,
     net: { offline: "沒有網路連線。", timeout: "連線逾時。" },
     widgetsFollow: "小工具會在下次更新時換語言。更新時間由 iOS 決定，通常在 20 分鐘內。",
+    pinOnMap: "在地圖上釘選", pinHint: "移動地圖，讓圖釘對準地點。", pinAdd: "加入這個地點",
+    pinOutside: "這個地點不在臺灣：氣象署的預報涵蓋臺灣、澎湖、金門與馬祖。", pinOutsideShort: "不在臺灣：這裡沒有預報",
     outside: "不在臺灣", outsideShort: "這裡沒有預報",
     outsideNote: "你所在的地方沒有預報：氣象署的鄉鎮預報涵蓋臺灣、澎湖、金門與馬祖。已儲存的地點仍有預報，也可用「＋ 新增」加入地點。",
-    via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點" },
+    via: { apple: "鄉鎮由 Apple 地圖判定", nearest: "鄉鎮依最近的鄉鎮中心", saved: "已儲存的地點", pin: "在地圖上釘選的地點" },
     station: (name, km) => `測站 ${name} ${km} 公里`, staleBanner: "顯示上一次的預報。", until: (t) => `至 ${t}`,
     noRain24: "未來 24 小時預計不會下雨。", rainNowLong: (p) => `現在正在下雨（${p}）。`,
     rainAtLong: (tmrw, t, p) => `${tmrw ? "明天 " : ""}${t} 左右可能下雨（${p}）。`,
@@ -1935,15 +1957,16 @@ function detailHTML(r, ui = {}) {
   const act = (path) => `tw-weather://${path}`;
 
   // Swiping, or the dots at the bottom, moves between My Location and the saved places, as in the Weather app.
+  const label = (p) => p.county + p.name + (p.latitude != null ? " 📌" : ""); // 📌: pinned on the map
   const order = ["here", ...places.map((_, i) => i)], at = Math.max(0, order.indexOf(ui.current ?? "here"));
   const dots = order.length < 2 ? "" : `<nav class="dots">${order.map((p, i) =>
     `<a class="dot${i === at ? " on" : ""}" href="${act(`show?place=${p}&dir=${i > at ? "left" : "right"}`)}" ` +
-    `aria-label="${p === "here" ? w.here : esc(places[p].county + places[p].name)}">${p === "here" ? "➤" : "●"}</a>`).join("")}</nav>`;
+    `aria-label="${p === "here" ? w.here : esc(label(places[p]))}">${p === "here" ? "➤" : "●"}</a>`).join("")}</nav>`;
 
   // Places: My Location, saved townships (the current one can be removed), and Add.
   const current = ui.current ?? "here";
   const chips = [`<a class="chip${current === "here" ? " on" : ""}" href="${act("show?place=here")}">📍 ${w.here}</a>`,
-    ...places.map((p, i) => `<a class="chip${current === i ? " on" : ""}" href="${act("show?place=" + i)}">${esc(p.county + p.name)}</a>` +
+    ...places.map((p, i) => `<a class="chip${current === i ? " on" : ""}" href="${act("show?place=" + i)}">${esc(label(p))}</a>` +
       (current === i ? `<a class="chip x" href="${act("remove?place=" + i)}" aria-label="${w.remove}">✕</a>` : "")),
     `<button class="chip" id="add" type="button">＋ ${w.add}</button>`].join("");
 
@@ -2079,7 +2102,10 @@ function detailHTML(r, ui = {}) {
   const models = r.sources.filter((s) => s !== "cwa").length;
   const toggle = (key, label) => `<p class="row"><span>${label}</span><a class="seg-btn${settings.notify[key] ? " on" : ""}" ` +
     `href="${act(`notify?${key}=${settings.notify[key] ? 0 : 1}`)}">${settings.notify[key] ? w.on : w.off}</a></p>`;
-  const townNames = TOWN_POINTS.map((t) => t.county + t.name);
+  // the townships for ＋ Add: by name, or the one nearest a spot pinned on the map (its centre: CWA's forecast point)
+  const townPoints = TOWN_POINTS.map((t) => [t.county + t.name, +t.latitude.toFixed(3), +t.longitude.toFixed(3)]);
+  const pinStart = r.loc && r.loc.latitude > 20.6 && r.loc.latitude < 27 && r.loc.longitude > 117.6 && r.loc.longitude < 123.4
+    ? [+r.loc.latitude.toFixed(4), +r.loc.longitude.toFixed(4), 12] : [23.7, 121.0, 7]; // where you are, or all Taiwan
 
   return `<html lang="${LANG === "zh" ? "zh-Hant-TW" : "en"}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="no-referrer">
@@ -2147,6 +2173,13 @@ footer { text-align: center; line-height: 1.6; } .err { color: #ffd166; }
 .sheet ol { list-style: none; margin: 0; padding: 0; overflow-y: auto; } .sheet li a { display: block; padding: 10px 4px;
   color: #fff; text-decoration: none; border-top: 1px solid var(--line); }
 .sheet button { font: 15px -apple-system, system-ui, sans-serif; color: #7cc4ff; background: none; border: 0; padding: 6px; }
+#picker .card { grid-template-rows: auto auto auto minmax(0, 1fr) auto; } .sheet .pin-open { justify-self: start; }
+.pin-wrap { position: relative; } #pin-map { height: min(50vh, 360px); border-radius: 10px; background: #e6e9ee; }
+.pin { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -88%); z-index: 1000; font-size: 30px;
+  line-height: 1; pointer-events: none; }
+.pin-add { display: block; margin-top: 8px; padding: 10px; border-radius: 10px; background: #0a84ff; color: #fff;
+  text-align: center; text-decoration: none; font: 600 16px -apple-system, system-ui, sans-serif; }
+.pin-add[aria-disabled="true"] { opacity: .4; pointer-events: none; }
 body.busy::after { content: attr(data-loading); position: fixed; inset: 0; display: grid; place-items: center;
   background: rgba(0, 0, 0, .35); font-size: 17px; z-index: 3000; }
 main { touch-action: pan-y; transition: transform .25s ease, opacity .25s ease; } main.drag { transition: none; }
@@ -2212,6 +2245,7 @@ body[data-enter="left"] main { animation: from-right .3s ease-out; } body[data-e
   <p class="cond">${esc(wx)}</p>
   <p class="hl">${w.hiLoWide(fmtT(r.summary.hi), fmtT(r.summary.lo))}</p>`}
 </header>
+${ui.notice ? card("", `<p>${esc(ui.notice)}</p>`, "alert") : ""}
 ${r.stale ? card("", `<p>${w.staleBanner} ${esc(errorLines(r.errors).join(" · "))}</p>`, "alert") : ""}
 ${warnings ? card("", warnings, "alert", dp && dp.warnings.length ? "warnings" : "") : ""}
 ${nextHour}
@@ -2234,14 +2268,17 @@ ${r.errors.length && !r.stale ? `<br><span class="err">${errorLines(r.errors).ma
 ${dots}
 <div class="incoming" id="incoming" hidden><p class="place" id="incoming-name"></p><p>${w.loading}</p></div>
 <div class="sheet" id="picker" hidden><div class="card"><h2>${w.addTitle}</h2>
-<input id="q" type="search" placeholder="${esc(w.search)}" autocomplete="off"><ol id="results"></ol>
+<input id="q" type="search" placeholder="${esc(w.search)}" autocomplete="off">
+<button type="button" class="pin-open" id="pin-open">📌 ${w.pinOnMap}</button><ol id="results"></ol>
+<div id="pin-view" hidden><div class="pin-wrap"><div id="pin-map"></div><span class="pin" aria-hidden="true">📍</span></div>
+<p class="note" id="pin-town">${w.pinHint}</p><a class="pin-add" id="pin-add" href="#" aria-disabled="true">${w.pinAdd}</a></div>
 <button type="button" id="cancel">${w.cancel}</button></div></div>
 ${dp ? `<div class="sheet" id="detail" hidden><div class="card detail" role="dialog">
 <div class="d-head"><h2 id="d-title"></h2><button type="button" id="d-close" aria-label="${esc(w.d.close)}">✕</button></div>
 <div class="tabs" id="d-kinds"></div><div class="tabs" id="d-days"></div><p class="d-big" id="d-big"></p><p class="d-pick" id="d-pick"></p>
 <div id="d-chart"></div><div id="d-more"></div><p class="d-text" id="d-text"></p><p class="d-about" id="d-about"></p></div></div>` : ""}
 <script>
-const towns = ${JSON.stringify(townNames)};
+const towns = ${JSON.stringify(townPoints)}; // [name, latitude, longitude] of each township's centre
 const picker = document.getElementById("picker"), q = document.getElementById("q"), results = document.getElementById("results");
 document.addEventListener("click", (e) => {
   if (e.target.closest('a[href^="tw-weather:"]')) document.body.classList.add("busy");
@@ -2249,7 +2286,7 @@ document.addEventListener("click", (e) => {
 function search() {
   const text = q.value.trim().replace(/台/g, "臺");
   results.innerHTML = "";
-  for (const name of towns.filter((t) => text && t.includes(text)).slice(0, 40)) {
+  for (const [name] of towns.filter(([t]) => text && t.includes(text)).slice(0, 40)) {
     const li = document.createElement("li"), a = document.createElement("a");
     a.href = "tw-weather://add?place=" + encodeURIComponent(name);
     a.textContent = name;
@@ -2258,13 +2295,56 @@ function search() {
   }
 }
 q.addEventListener("input", search);
-document.getElementById("add").addEventListener("click", () => { picker.hidden = false; q.value = ""; search(); q.focus(); });
+const pinOpen = document.getElementById("pin-open"), pinView = document.getElementById("pin-view");
+const showSearch = (on) => { q.hidden = results.hidden = pinOpen.hidden = !on; pinView.hidden = on; };
+document.getElementById("add").addEventListener("click", () => { picker.hidden = false; showSearch(true); q.value = ""; search(); q.focus(); });
 document.getElementById("cancel").addEventListener("click", () => { picker.hidden = true; });
+
+// 📌 Pin on the map: the map moves under a pin at its centre, which names the township there (the nearest centre;
+// the script asks the geocoder when the spot is added), and Add saves that spot itself.
+const pinStart = ${JSON.stringify(pinStart)}, reachKm = ${CONFIG.taiwanReachKm};
+const pinTown = document.getElementById("pin-town"), pinAdd = document.getElementById("pin-add");
+let pinMap = null, pinLoading = false;
+const km = (a, b, c, d) => { // great-circle distance between two latitude/longitude pairs
+  const r = Math.PI / 180, h = Math.sin((c - a) * r / 2) ** 2 + Math.cos(a * r) * Math.cos(c * r) * Math.sin((d - b) * r / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+};
+const pinMoved = () => {
+  const c = pinMap.getCenter();
+  let best = null, bestKm = Infinity;
+  for (const [name, la, lo] of towns) { const d = km(c.lat, c.lng, la, lo); if (d < bestKm) { best = name; bestKm = d; } }
+  const inside = bestKm <= reachKm;
+  pinTown.textContent = inside ? best : ${JSON.stringify(w.pinOutsideShort)};
+  pinAdd.setAttribute("aria-disabled", String(!inside));
+  pinAdd.href = "tw-weather://add?lat=" + c.lat.toFixed(5) + "&lon=" + c.lng.toFixed(5);
+};
+pinOpen.addEventListener("click", () => {
+  showSearch(false);
+  if (pinMap) return pinMap.invalidateSize();
+  if (pinLoading) return; // (reopened while the map library is on its way: it starts the map when it comes)
+  const start = () => {
+    pinMap = L.map("pin-map", { zoomControl: false, minZoom: 7, maxZoom: 16, maxBounds: [[20.6, 117.6], [27.0, 123.4]],
+      maxBoundsViscosity: 1 }).setView([pinStart[0], pinStart[1]], pinStart[2]);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { minZoom: 7, maxZoom: 16,
+      attribution: "© OpenStreetMap contributors" }).addTo(pinMap);
+    pinMap.on("move", pinMoved);
+    pinMoved();
+  };
+  if (window.L) return start();
+  // the map library, the first time on a page without the radar
+  const css = document.createElement("link"), js = document.createElement("script");
+  css.rel = "stylesheet"; css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css";
+  js.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
+  pinLoading = true;
+  js.onload = () => { pinLoading = false; start(); };
+  js.onerror = () => { pinLoading = false; css.remove(); js.remove(); pinTown.textContent = ${JSON.stringify(w.mapOffline)}; };
+  document.head.append(css, js);
+});
 
 // Swipe left or right between places; the page follows the finger, as in the Weather app. If the next place
 // takes a moment, its name shows with "Loading…".
 const order = ${JSON.stringify(order)}, at = ${at};
-const names = ${JSON.stringify(order.map((p) => (p === "here" ? w.here : places[p].county + places[p].name)))};
+const names = ${JSON.stringify(order.map((p) => (p === "here" ? w.here : label(places[p]))))};
 let touching = false;
 (() => {
   const main = document.querySelector("main"), incoming = document.getElementById("incoming");
@@ -2791,6 +2871,21 @@ function findPlace(text) {
   return named.length === 1 ? named[0] : null;
 }
 
+// A saved place as run() takes it: its township, at the spot it was pinned on the map if it was ({ county, name,
+// latitude, longitude } in settings.places; a township alone has no latitude).
+function savedPlace(p) {
+  const town = p && findPlace(p.county + p.name);
+  return town && p.latitude != null ? { ...town, latitude: p.latitude, longitude: p.longitude, pin: true } : town;
+}
+
+// The place a widget's Parameter or a link names: the first saved place in that township (at its pin, if pinned),
+// else the township itself.
+function placeFor(text, settings) {
+  const town = findPlace(text);
+  const saved = town && (settings.places || []).find((p) => p.county === town.county && p.name === town.name);
+  return saved ? savedPlace(saved) : town;
+}
+
 async function askKey(message) {
   const a = new Alert();
   a.title = T().keyTitle;
@@ -2817,7 +2912,7 @@ async function main() {
   const family = config.widgetFamily || "medium";
   // A widget's Parameter (or a pinned widget's tap, ?place=…) picks a saved place instead of the phone's location.
   const asked = args.widgetParameter || (args.queryParameters && args.queryParameters.place) || "";
-  const pinned = findPlace(asked);
+  const pinned = placeFor(asked, settings);
   if (config.runsInApp) {
     if (asked && !pinned) throw new Error(T().unknownPlace(asked));
     return showApp(await ensureKey(), settings, pinned);
@@ -2883,8 +2978,8 @@ async function showApp(key, settings, pinned) {
     saveSettings(settings);
   }
   // Forecasts by place (and key), so swiping back and forth is instant; each is refetched after 10 minutes.
-  const placeOf = (i) => (i === "here" ? null : findPlace(settings.places[i].county + settings.places[i].name));
-  const nameOf = (p) => (p ? p.county + p.name : "here") + "|" + key;
+  const placeOf = (i) => (i === "here" ? null : savedPlace(settings.places[i]));
+  const nameOf = (p) => (p ? placeKey(p) : "here") + "|" + key;
   const cache = new Map(), loading = new Map();
   const forecast = (p) => {
     const name = nameOf(p), hit = cache.get(name);
@@ -2952,17 +3047,29 @@ async function showApp(key, settings, pinned) {
   };
   const handle = async (action, params) => {
     if (action === "show") return show(settings.places[Number(params.place)] ? Number(params.place) : "here", params.dir || "");
+    if (action === "add" && params.lat) { // a spot pinned on the map: saved as it is, with its township
+      const pin = { latitude: Number(params.lat), longitude: Number(params.lon) };
+      let i = settings.places.findIndex((p) => p.latitude != null && distanceKm(p, pin) < 0.1); // already there?
+      if (i < 0) {
+        const t = await townAt(pin);
+        if (!t) return draw({ notice: T().pinOutside });
+        i = settings.places.push({ county: t.county, name: t.name, latitude: +pin.latitude.toFixed(5),
+          longitude: +pin.longitude.toFixed(5) }) - 1;
+        saveSettings(settings);
+      }
+      return show(i);
+    }
     if (action === "add") {
       const t = findPlace(params.place);
       if (!t) return draw();
-      let i = settings.places.findIndex((p) => p.county === t.county && p.name === t.name);
+      let i = settings.places.findIndex((p) => p.latitude == null && p.county === t.county && p.name === t.name); // (a pin there is another place)
       if (i < 0) i = settings.places.push({ county: t.county, name: t.name }) - 1;
       saveSettings(settings);
       return show(i);
     }
     if (action === "remove") {
       const [gone] = settings.places.splice(Number(params.place), 1);
-      if (gone) cache.delete(nameOf(gone));
+      if (gone) cache.delete(nameOf(savedPlace(gone)));
       saveSettings(settings);
       return show("here");
     }

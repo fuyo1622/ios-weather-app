@@ -157,6 +157,18 @@ await test("widgets abroad: My Location says it's outside Taiwan, with nothing d
   assert.deepEqual(p.seen.notes, []);
 });
 
+await test("widgets: a place pinned on the map is forecast at its pin (the widget picker lists it by its township)", async () => {
+  fixtures(E.tw("2026-10-02T13:20"));
+  const p = phone({ key: "KEY" });
+  fs.mkdirSync(path.join(p.dir, "taiwan-weather"), { recursive: true });
+  fs.writeFileSync(path.join(p.dir, "taiwan-weather", "settings.json"),
+    JSON.stringify({ places: [{ county: "花蓮縣", name: "秀林鄉", latitude: 24.159, longitude: 121.621 }] }));
+  p.ctx.__start("widget", { places: ["花蓮縣秀林鄉"] });
+  await until(() => p.seen.done, 10000);
+  assert.equal(p.seen.widgets[0].data.place, "花蓮縣秀林鄉");
+  assert.ok(p.seen.http.some((u) => u.includes("latitude=24.1590&longitude=121.6210")), p.seen.http.join("\n"));
+});
+
 await test("language on Android: the widgets refresh at once, with the choice already saved, so the page needn't mention them", async () => {
   fixtures(E.tw("2026-10-02T13:20"));
   const p = phone({ key: "KEY" });

@@ -440,7 +440,7 @@ export async function loadScript() {
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const exportsLine = "\nreturn { hourKey, addHours, keyToDate, cwaElementHourly, blend, computeSkill, sourceParams," +
     " recordForecasts, recordObservation, hourlyRain, rainAcc, wxText, isNight, wxSymbol, nowText, summarize," +
-    " nearestStation, nearestTown, TOWN_POINTS, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
+    " nearestStation, nearestTown, TOWN_POINTS, placeFor, savedPlace, COUNTY_DATASET, run, buildWidget, detailHTML, main, CONFIG, DRY_6H," +
     " sunTimes, moonPhase, feelsLike, dewPoint, beaufort, compass, wmoText, dailyForecast, outlook, findPlace, setLang, WORDS," +
     " nowcastFrom, rainRadarPixel, RAIN_RADARS, radarDBZ, RAINVIEWER_COLORS, sharedDownloads, savedForecast," +
     " placeholderHTML, fetchRainRadarFrames, pickFrames, replayFrames, rainRadarGrid, CWA_RADAR_COLORS, CWA_SITE, notifyChanges, radarOutlook, rainSummary, rainSentence, detailHours, detailPage, moonTimes, moonAltitude," +

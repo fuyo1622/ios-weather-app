@@ -142,7 +142,7 @@
       const globals = { __TEST__: true, Request, FileManager, Location, Keychain, config, Script, args, Notification,
         ListWidget, Color, Font, Size, LinearGradient, SFSymbol, Alert, WebView, Timer };
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-      const exportsLine = "\nreturn { main, run, loadSettings, saveSettings, setLang, findPlace, sendNotification, T, WORDS," +
+      const exportsLine = "\nreturn { main, run, loadSettings, saveSettings, setLang, findPlace, placeFor, sendNotification, T, WORDS," +
         " EMOJI, wxSymbol, fmtT, fmtHour, nowText, KEYCHAIN_KEY };";
       const W = await new AsyncFunction(...Object.keys(globals), Native.asset("TaiwanWeather.js") + exportsLine)(...Object.values(globals));
       android(W);
@@ -158,7 +158,7 @@
         const key = Keychain.contains(W.KEYCHAIN_KEY) ? Keychain.get(W.KEYCHAIN_KEY) : null;
         for (const name of (params && params.places) || [""]) {
           try {
-            const place = name ? W.findPlace(name) : null;
+            const place = name ? W.placeFor(name, settings) : null; // (a saved place pinned on the map: at its pin)
             if (name && !place) throw new Error(W.T().unknownPlace(name));
             const r = await W.run(key, { place, settings });
             Native.widget(name, JSON.stringify(widgetData(W, r)));

@@ -2,10 +2,11 @@
 # The emulator test (GitHub Actions, .github/workflows/android.yml): install the test build and open it at Taipei 101
 # as on a new phone, typing the CWA key ($CWA_KEY) into its first-run dialog; photograph the dialog, the full view, a
 # detail sheet, the page after Android's back button, the radar, the page after its 中文 link, the three widgets, the
-# test notification, the page with no internet, and then, with the phone moved to Tokyo, the widgets and the page
-# outside Taiwan; fail if the script logged an error, the key wasn't kept, a link or a notification didn't work, the
-# widgets got no forecast or didn't follow the language, no internet wasn't said once, or abroad, a forecast showed. The screenshots and the log are a public artifact: nothing here prints the
-# key, and no screenshot is taken while it is on screen.
+# test notification, the page with no internet, then, with the phone moved to Tokyo, the widgets and the page
+# outside Taiwan, and last a spot pinned on the map (Taroko) and its page; fail if the script logged an error, the key
+# wasn't kept, a link or a notification didn't work, the widgets got no forecast or didn't follow the language, no
+# internet wasn't said once, abroad a forecast showed, or the pinned spot wasn't saved. The screenshots and the log
+# are a public artifact: nothing here prints the key, and no screenshot is taken while it is on screen.
 #   bash android/ci/smoke.sh <app-debug.apk> <folder for the screenshots and the log>
 set -eu # (no pipefail: grep stopping early would fail the log pipes)
 APK=$1
@@ -197,6 +198,26 @@ for _ in $(seq 1 30); do
 done
 shot 10-abroad-view
 
+stage "a spot pinned on the map"
+# ＋ 新增 → 📌 在地圖上釘選: the map moves under the pin to Taroko (as a finger would move it), and 加入這個地點
+# saves that spot with its township; the page then shows it, its chip marked 📌.
+page "document.getElementById('add').click(); document.getElementById('pin-open').click(); 'opened the pin map'"
+for _ in $(seq 1 10); do # the map library and its tiles come from the internet
+  sleep 3
+  page "typeof pinMap !== 'undefined' && pinMap ? (pinMap.setView([24.159, 121.621], 13), 'pin at ' + document.getElementById('pin-town').textContent) : 'waiting'"
+  log | grep 'eval: "pin at ' > /dev/null && break
+done
+sleep 4 # (its tiles)
+shot 11-pin-map
+page "document.getElementById('pin-add').getAttribute('aria-disabled') === 'false' ? (document.getElementById('pin-add').click(), 'tapped 加入這個地點') : 'its Add is off'"
+for _ in $(seq 1 20); do
+  sleep 3
+  page "(document.querySelector('.chip.on') || { textContent: '' }).textContent.includes('📌') && document.body.innerText.includes('在地圖上釘選的地點') ? 'pin saved: ' + document.querySelector('.chip.on').textContent : 'waiting'"
+  log | grep 'eval: "pin saved' > /dev/null && break
+done
+sleep 3
+shot 12-pinned-place
+
 log > "$OUT/logcat.txt"
 grep -q 'eval: "sheet closed by back"' "$OUT/logcat.txt" || fail "the back button didn't close the sheet"
 grep -q 'eval: "page in 中文"' "$OUT/logcat.txt" || fail "the 中文 link didn't switch the page"
@@ -207,6 +228,7 @@ grep -q 'eval: "no internet said once"' "$OUT/logcat.txt" || fail "with no inter
 grep -q "widget data for 'My Location': .*\"outside\":true" "$OUT/logcat.txt" || fail "abroad, the widget didn't say outside Taiwan"
 grep -q 'eval: "page outside Taiwan"' "$OUT/logcat.txt" || fail "abroad, the page didn't say outside Taiwan"
 grep -q 'eval: "降雨雷達 replaying"' "$OUT/logcat.txt" || fail "the 降雨雷達 tab didn't replay"
+grep -q 'eval: "pin saved' "$OUT/logcat.txt" || fail "a spot pinned on the map wasn't saved and shown"
 if grep -E "Uncaught|TypeError|ReferenceError|SyntaxError|TaiwanWeather.js stopped" "$OUT/logcat.txt"; then fail "script errors above"; fi
 grep -E 'eval: "|widget data for' "$OUT/logcat.txt" | cut -c1-400
 echo "emulator test passed"

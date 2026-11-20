@@ -29,7 +29,9 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
 5. **Add widgets**: long-press the Home Screen → `+` → Scriptable → pick Small / Medium / Large → edit widget → Script: `TaiwanWeather`.
    Lock Screen: customise → add Scriptable (circular / rectangular / inline) → same script.
    To show a fixed place instead of where you are, type its township in the widget's **Parameter** field, e.g.
-   `臺南市東區` (or a township name found only once in Taiwan, e.g. `花蓮市`); tapping that widget opens it.
+   `臺南市東區` (or a township name found only once in Taiwan, e.g. `花蓮市`); tapping that widget opens it. If you
+   saved places in that township, the widget shows the first of them, so it can be a spot pinned on the map (Places,
+   below).
 6. In iOS Settings → Privacy → Location Services → Scriptable → choose **"While Using the App or Widgets"**.
 
 **Widgets:** Small shows now, condition, today's high/low and the next rain; Medium adds 8 hours (every 2 h);
@@ -87,8 +89,10 @@ Scriptable always shows its own bar (with Close) above a page it presents; its A
   Later days' hours are fitted to the high, low and rain chance in the ten-day list, and every day's UV to its peak
   there, so a day's sheet always agrees with its row. Air quality is CAMS via Open-Meteo; warning texts CWA's
   W-C0033-002.
-- **Places**: swipe left or right between My Location and saved townships (dots at the bottom show where you are), or
-  use the chips at the top; **＋ Add** searches all 368 townships. Places on either side load ahead, so swipes are
+- **Places**: swipe left or right between My Location and saved places (dots at the bottom show where you are), or
+  use the chips at the top; **＋ Add** searches all 368 townships, or **📌 Pin on the map** saves an exact spot: move
+  the map under the pin, and the spot gets its township's CWA forecast, with the models, the station and the radar at
+  the spot itself (its chip is marked 📌; a spot outside Taiwan isn't added). Places on either side load ahead, so swipes are
   instant; a place not loaded within a second shows its last saved forecast (or its name) until the new one is in.
   Radar, warnings and the station list are downloaded once for all places. Each saved place keeps its own forecast
   history, so it learns its own source errors.
@@ -167,17 +171,17 @@ allow installing from that source; the first run asks for the CWA key, as on the
   (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101, first run as on a new phone:
   the CWA key (from the repository's secrets) typed into its dialog, then the full view, a detail sheet, the back
   button, the radar, the 中文 link, the widgets, the test notifications, the full view in airplane mode, and the
-  widgets and full view with the phone moved to Tokyo, each photographed (the "emulator" artifact of each run, never
-  showing the key). The run fails on any script error, or if the key isn't kept, a link or a notification doesn't
-  work, the widgets get no forecast or don't follow the language, no internet isn't said once, or abroad, a forecast
-  still shows. The release APK is signed with a key kept in the
+  widgets and full view with the phone moved to Tokyo, and a spot pinned on the map, each photographed (the
+  "emulator" artifact of each run, never showing the key). The run fails on any script error, or if the key isn't
+  kept, a link or a notification doesn't work, the widgets get no forecast or don't follow the language, no internet
+  isn't said once, abroad a forecast still shows, or the pinned spot isn't saved. The release APK is signed with a key kept in the
   repository's secrets, so each build installs over the one before.
 - `node test/android-shim.mjs` runs the shim's tests locally.
 
 ## Toward the iPhone Weather app
 Done: hourly and ten-day forecasts, the detail tiles and a detail sheet behind every card, air quality, CWA warnings,
 an animated radar map and CWA's 降雨雷達 with its own replay, next-hour rain timing, sunrise/sunset, moonrise/moonset and phases, saved
-places with swiping, English / 中文, and notifications.
+places (townships, or spots pinned on the map) with swiping, English / 中文, and notifications.
 Next, roughly in order:
 - Taiwan's official air-quality stations (環境部, needs a free API key) instead of the model estimate.
 - Today's high/low against the normal for the date.
