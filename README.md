@@ -25,9 +25,11 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
    At its first run it downloads the full `TaiwanWeather.js` from this repository (branch `main`) and keeps it on the
    phone next to the forecasts. After that, updates come by themselves: each time the app opens, it asks GitHub for a
    new version and uses it from the next time. Widgets run the copy kept on the phone, with no download.
-   Scriptable never opens the long script itself. On iOS 27 a long script can crash Scriptable at every start, and a
-   reinstall doesn't help while it sits in Scriptable's iCloud Drive folder. In that case, first move the long
-   `TaiwanWeather` out of the Scriptable folder with the Files app.
+   Scriptable never opens the long script itself: App Store reviews report long scripts crashing Scriptable on iOS 27.
+   Everything is kept on the phone, never in iCloud.
+   **If Scriptable crashes as it opens** and your iCloud storage is full, it may be failing to keep its scripts in iCloud
+   Drive. Turn iCloud off for Scriptable only: Settings → your name → iCloud → See All → Scriptable (perhaps inside
+   iCloud Drive). It then keeps its scripts on the phone. This changes only that iPhone.
 4. **Run it once inside Scriptable** (online, for the download): paste the API key when asked (stored in the iOS Keychain), and allow location access. You'll see the full view.
    If CWA rejects the key (e.g. a typo), running the script in the app again offers to replace it.
 5. **Add widgets**: long-press the Home Screen → `+` → Scriptable → pick Small / Medium / Large → edit widget → Script: `TaiwanWeather`.

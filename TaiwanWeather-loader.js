@@ -3,9 +3,9 @@
 // icon-color: deep-blue; icon-glyph: cloud-sun-rain;
 
 // TaiwanWeather, the short way in: this runs the full script (TaiwanWeather.js from github.com/fuyo1622/ios-weather-app,
-// branch main), which it keeps on this iPhone next to the forecasts, so Scriptable never opens the long script itself
-// (on iOS 27 a long script can crash Scriptable, which then crashes again at every start). In the app it also asks
-// GitHub for a new version and keeps it for the next time; widgets run the version kept here, with no download.
+// branch main), which it keeps on this iPhone next to the forecasts, never in iCloud. Scriptable never opens the long
+// script itself (long scripts have crashed Scriptable on iOS 27). In the app it also asks GitHub for a new version and
+// keeps it for the next time; widgets run the version kept here, with no download.
 // Name this script TaiwanWeather: the widgets and their tap links look for that name.
 const SOURCE = "https://raw.githubusercontent.com/fuyo1622/ios-weather-app/main/TaiwanWeather.js";
 const fm = FileManager.local();

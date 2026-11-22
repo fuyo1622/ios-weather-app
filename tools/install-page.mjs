@@ -89,17 +89,23 @@ textarea { width: 100%; box-sizing: border-box; height: 16em; resize: vertical; 
   </section>
 
   <section>
-    <h2>Already have TaiwanWeather, or Scriptable crashes when it opens?</h2>
-    <p class="note">First move the old, long TaiwanWeather out of Scriptable's folder. On iOS 27 it can crash Scriptable at every
-      start, and reinstalling Scriptable doesn't remove it from iCloud Drive. Your CWA key and forecast history stay.<br>
-      先把舊的長版 TaiwanWeather 移出 Scriptable 的資料夾：在 iOS 27 上它會讓 Scriptable 每次開啟就閃退，而重新安裝 Scriptable 並不會把它從 iCloud 雲碟刪除。授權碼與預報紀錄都會保留。</p>
+    <h2>Scriptable crashes when it opens?</h2>
+    <p class="note">If your iCloud storage is full, Scriptable may fail to keep its scripts in iCloud Drive. Let it keep them on the
+      phone instead. This changes only this iPhone. The short script keeps everything on the phone, never in iCloud.<br>
+      iCloud 空間已滿時，Scriptable 可能無法把程式存在 iCloud 雲碟。改成存在手機上即可；這只影響這支 iPhone。這個短程式的所有資料都存在手機上，不用 iCloud。</p>
     <ol>
-      <li>Open the <b>Files</b> app → <b>Browse</b> → the <b>Scriptable</b> folder (under iCloud Drive, or On My iPhone).<span>打開「檔案」App →「瀏覽」→ Scriptable 資料夾（在 iCloud 雲碟或「我的 iPhone」裡）。</span></li>
-      <li>Hold <b>TaiwanWeather</b> → <b>Move</b> → <b>On My iPhone</b> → <b>Downloads</b> → <b>Move</b>.<span>長按 TaiwanWeather →「搬移」→「我的 iPhone」→「下載項目」→「搬移」。</span></li>
-      <li>Open Scriptable, then follow the steps below.<span>打開 Scriptable，再照下面的步驟做。</span></li>
+      <li><b>Settings</b> → your name → <b>iCloud</b> → <b>See All</b> (next to Saved to iCloud) → <b>Scriptable</b> (it may be inside
+        <b>iCloud Drive</b>) → off.<span>「設定」→ 你的名字 → iCloud →「儲存到 iCloud」旁的「顯示全部」→ Scriptable（可能在「iCloud 雲碟」裡）→ 關閉。</span></li>
+      <li>Open Scriptable (its list is empty now), then follow the steps below.<span>打開 Scriptable（清單現在是空的），再照下面的步驟做。</span></li>
     </ol>
-    <p class="note">If the folder is in iCloud Drive, your other iPhones share it: open TaiwanWeather in Scriptable there once too, so
-      they download the full script as well.<br>若資料夾在 iCloud 雲碟，其他 iPhone 也共用它：在那些手機的 Scriptable 也打開 TaiwanWeather 一次，讓它們也下載完整程式。</p>
+    <p class="note">Still crashes? Tell Claude. 仍然閃退的話，請告訴 Claude。</p>
+  </section>
+
+  <section>
+    <h2>Already have the long TaiwanWeather?</h2>
+    <p class="note">Where Scriptable works, you can switch: copy the short script, open TaiwanWeather in Scriptable, select all, and
+      paste over it. Then tap ▶ once; updates come by themselves from then on.<br>
+      在 Scriptable 正常的手機上也可以換成短程式：複製後到 Scriptable 打開 TaiwanWeather，全選後貼上取代，再按一次 ▶；之後就會自動更新。</p>
   </section>
 
   <section>
