@@ -189,6 +189,26 @@ await test("a damaged kept copy: widgets say to open the app, and the app downlo
   assert.equal(fs.readFileSync(kept(), "utf8"), version("4"));
 });
 
+await test("without the response's details (status, ETag), a whole script is still kept, and an empty answer changes nothing", async () => {
+  class Bare extends GitHubRequest { async loadString() { const s = await super.loadString(); delete this.response; return s; } }
+  Object.assign(github, { status: 200, code: version("5"), etag: null });
+  phone({ fresh: true });
+  globalThis.Request = Bare;
+  await runLoader();
+  assert.deepEqual(shown.ran.map((r) => r.v), ["5"]);
+  assert.equal(keptInfo().etag, null);
+  // the app's next check, answered with nothing (as a "304 Not Modified" without its status would be)
+  class Empty extends GitHubRequest { async loadString() { await super.loadString(); delete this.response; return ""; } }
+  fs.writeFileSync(path.join(docs, "taiwan-weather", "TaiwanWeather.code.json"), JSON.stringify({ etag: '"v5"' }));
+  phone();
+  globalThis.Request = Empty;
+  await runLoader();
+  await settle();
+  assert.deepEqual(shown.ran.map((r) => r.v), ["5"]);
+  assert.equal(fs.readFileSync(kept(), "utf8"), version("5"));
+  assert.equal(shown.alerts.length, 0);
+});
+
 await test("the loader stays short (that is its point), with the full script's icon and its address on GitHub", async () => {
   assert.ok(loader.split("\n").length < 80, `${loader.split("\n").length} lines`);
   assert.ok(loader.startsWith("// Variables used by Scriptable.\n// These must be at the very top of the file. Do not edit.\n" +

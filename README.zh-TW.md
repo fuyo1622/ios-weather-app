@@ -18,7 +18,7 @@
 
 1. **申請氣象署 API 授權碼**（免費）：<https://opendata.cwa.gov.tw/userLogin> → 加入會員 → 氣象會員登入，再到 開發指南 → 使用說明 → 取得授權碼，複製 `CWA-` 開頭的授權碼。
 2. 在 iPhone 安裝 **[Scriptable](https://apps.apple.com/app/scriptable/id1405459188)**（免費）。
-3. **把短程式放進手機**：打開 Scriptable → 右上角 `+` → 貼上 [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) 的內容（72 行）→ 點最上方的標題，改名為 `TaiwanWeather`。第一次執行時，它會從本儲存庫（`main` 分支）下載完整的 `TaiwanWeather.js`，存在手機上、與預報資料放在一起。之後的更新會自動完成：每次打開 App，它會向 GitHub 查詢新版，並在下次開啟時使用；小工具用手機上保留的那一份，不必下載。Scriptable 本身從不打開這支長程式。在 iOS 27 上，長程式可能讓 Scriptable 每次開啟就閃退，而只要它還在 Scriptable 的 iCloud 雲碟資料夾裡，重新安裝也沒用；遇到這種情況，請先用「檔案」App 把長版的 `TaiwanWeather` 移出 Scriptable 資料夾。
+3. **把短程式放進手機**：打開 Scriptable → 右上角 `+` → 貼上 [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) 的內容（約 70 行）→ 點最上方的標題，改名為 `TaiwanWeather`。第一次執行時，它會從本儲存庫（`main` 分支）下載完整的 `TaiwanWeather.js`，存在手機上、與預報資料放在一起。之後的更新會自動完成：每次打開 App，它會向 GitHub 查詢新版，並在下次開啟時使用；小工具用手機上保留的那一份，不必下載。Scriptable 本身從不打開這支長程式。在 iOS 27 上，長程式可能讓 Scriptable 每次開啟就閃退，而只要它還在 Scriptable 的 iCloud 雲碟資料夾裡，重新安裝也沒用；遇到這種情況，請先用「檔案」App 把長版的 `TaiwanWeather` 移出 Scriptable 資料夾。
 4. **在 Scriptable 裡執行一次**（需連網以下載）：依提示貼上授權碼（存在 iOS 的鑰匙圈裡），並允許取用位置，就會看到完整畫面。若氣象署不接受這組授權碼（例如打錯字），在 App 裡再執行一次就能換一組。
 5. **加入小工具**：長按主畫面 → `+` → Scriptable → 選小／中／大 → 編輯小工具 → Script 選 `TaiwanWeather`。
    鎖定畫面：自訂 → 加入 Scriptable（圓形／矩形／單行）→ 選同一個程式。

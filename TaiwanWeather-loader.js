@@ -29,11 +29,11 @@ async function download(etag) {
   req.timeoutInterval = 30;
   if (etag) req.headers = { "If-None-Match": etag };
   const code = await req.loadString();
-  const status = req.response ? req.response.statusCode : 0;
-  if (status === 304) return null;
+  const status = req.response && req.response.statusCode ? req.response.statusCode : 200; // (the file itself is checked)
+  if (status === 304 || (etag && code === "")) return null;
   if (status !== 200) throw new Error("GitHub answered " + status);
   const run = compile(code);
-  const headers = req.response.headers || {};
+  const headers = (req.response && req.response.headers) || {};
   const tag = Object.keys(headers).find((k) => k.toLowerCase() === "etag");
   if (!fm.fileExists(dir)) fm.createDirectory(dir, true);
   fm.writeString(codeFile, code);

@@ -21,7 +21,7 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
    開發指南 → 使用說明 → 取得授權碼. Copy the `CWA-...` key.
 2. **Install [Scriptable](https://apps.apple.com/app/scriptable/id1405459188)** (free) on your iPhone.
 3. **Put the short script on the phone**: open Scriptable → `+` → paste the contents of
-   [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) (72 lines) → tap the title and name it `TaiwanWeather`.
+   [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) (about 70 lines) → tap the title and name it `TaiwanWeather`.
    At its first run it downloads the full `TaiwanWeather.js` from this repository (branch `main`) and keeps it on the
    phone next to the forecasts. After that, updates come by themselves: each time the app opens, it asks GitHub for a
    new version and uses it from the next time. Widgets run the copy kept on the phone, with no download.

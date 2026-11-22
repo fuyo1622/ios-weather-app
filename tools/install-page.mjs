@@ -13,9 +13,9 @@ const [out, pageUrl = ""] = process.argv.slice(2);
 if (!out) throw new Error("usage: node tools/install-page.mjs <out.html> [page URL]");
 
 const code = fs.readFileSync(path.join(root, "TaiwanWeather-loader.js"), "utf8");
-const lines = code.split("\n").length;
+const lines = code.trimEnd().split("\n").length;
 const full = fs.readFileSync(path.join(root, "TaiwanWeather.js"), "utf8");
-const fullLines = full.split("\n").length, fullKb = Math.round(Buffer.byteLength(full) / 1024);
+const fullLines = full.trimEnd().split("\n").length, fullKb = Math.round(Buffer.byteLength(full) / 1024);
 const version = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" }); // YYYY-MM-DD
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
