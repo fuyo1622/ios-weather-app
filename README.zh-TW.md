@@ -18,10 +18,8 @@
 
 1. **申請氣象署 API 授權碼**（免費）：<https://opendata.cwa.gov.tw/userLogin> → 加入會員 → 氣象會員登入，再到 開發指南 → 使用說明 → 取得授權碼，複製 `CWA-` 開頭的授權碼。
 2. 在 iPhone 安裝 **[Scriptable](https://apps.apple.com/app/scriptable/id1405459188)**（免費）。
-3. **把程式放進手機**，以下任一方式皆可：
-   - 打開 Scriptable → 右上角 `+` → 貼上 `TaiwanWeather.js` 的內容 → 點最上方的標題，改名為 `TaiwanWeather`；或
-   - 用 *Windows 版 iCloud*（需開啟 iCloud 雲碟且空間未滿）：把 `TaiwanWeather.js` 複製到 iCloud 雲碟的 Scriptable 資料夾（在 Windows 上叫 `iCloud~dk~simonbs~Scriptable`，要先在手機上打開過 Scriptable 一次才會出現）。
-4. **在 Scriptable 裡執行一次**：依提示貼上授權碼（存在 iOS 的鑰匙圈裡），並允許取用位置，就會看到完整畫面。若氣象署不接受這組授權碼（例如打錯字），在 App 裡再執行一次就能換一組。
+3. **把短程式放進手機**：打開 Scriptable → 右上角 `+` → 貼上 [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) 的內容（72 行）→ 點最上方的標題，改名為 `TaiwanWeather`。第一次執行時，它會從本儲存庫（`main` 分支）下載完整的 `TaiwanWeather.js`，存在手機上、與預報資料放在一起。之後的更新會自動完成：每次打開 App，它會向 GitHub 查詢新版，並在下次開啟時使用；小工具用手機上保留的那一份，不必下載。Scriptable 本身從不打開這支長程式。在 iOS 27 上，長程式可能讓 Scriptable 每次開啟就閃退，而只要它還在 Scriptable 的 iCloud 雲碟資料夾裡，重新安裝也沒用；遇到這種情況，請先用「檔案」App 把長版的 `TaiwanWeather` 移出 Scriptable 資料夾。
+4. **在 Scriptable 裡執行一次**（需連網以下載）：依提示貼上授權碼（存在 iOS 的鑰匙圈裡），並允許取用位置，就會看到完整畫面。若氣象署不接受這組授權碼（例如打錯字），在 App 裡再執行一次就能換一組。
 5. **加入小工具**：長按主畫面 → `+` → Scriptable → 選小／中／大 → 編輯小工具 → Script 選 `TaiwanWeather`。
    鎖定畫面：自訂 → 加入 Scriptable（圓形／矩形／單行）→ 選同一個程式。
    想固定顯示某個地點、而不是目前位置，就在小工具的 **Parameter** 欄位輸入鄉鎮市區，例如 `臺南市東區`（或全臺只有一個的鄉鎮名稱，例如 `花蓮市`）；點這個小工具會打開該地點。若你在該鄉鎮儲存過地點，小工具會顯示其中第一個，所以也可以是在地圖上釘選的地點（見下方「地點」）。
@@ -68,12 +66,13 @@ Open-Meteo 與 RainViewer 的伺服器在德國，從臺灣連線有時要 2–4
 同一個 `TaiwanWeather.js` 也能在 Android App 中執行（Android 8 以上）：完整畫面與詳細資料、三種尺寸的主畫面小工具（目前位置或已儲存的地點：Android 8–11 在加入小工具時選擇，Android 12 以上長按小工具設定；點擊會打開該地點），以及降雨與特報通知。在手機上從 [android-latest 發行版](https://github.com/fuyo1622/ios-weather-app/releases/tag/android-latest) 下載 `TaiwanWeather.apk`，並允許從該來源安裝；第一次執行會和 iPhone 一樣要求輸入氣象署授權碼。
 - **運作方式**：App 在自己的 WebView 中執行這支程式，就像 Scriptable 一樣；`shim.js` 提供程式用到的 Scriptable API（網路請求、檔案、授權碼、位置、通知、對話框、顯示的頁面），底層是一個小型 Android 橋接（`Bridge.kt`）。頁面同樣以氣象署網站為基底網址載入，所以未來一小時卡片可以讀取降雨雷達。Android 的返回鍵會先關閉詳細資料或雷達的全螢幕。
 - **小工具** 使用 Android 原生的版面，內容是與 iPhone 小工具相同的預報與用語（`shim.js` 中的 `widgetData`），連網時每 15 分鐘（Android 的最短間隔）更新一次，換語言時立刻更新。不在 App 中時，目前位置是 App 最後看到的地點：Android 只在額外授權下才讓背景中的 App 取得位置。Android 沒有鎖定畫面小工具。
-- **在 GitHub Actions 上建置與測試**（電腦上不必安裝任何東西）：程式與 shim 的測試、APK（Gradle 8.11、JDK 17），接著在 Android 14 模擬器上以臺北 101 為位置，像新手機一樣第一次執行：把授權碼（來自儲存庫的 secrets）輸入對話框，然後檢查完整畫面、詳細資料、返回鍵、雷達、中文連結、小工具、測試通知、飛航模式下的完整畫面，把手機移到東京後的小工具與完整畫面，以及在地圖上釘選一個位置，並逐一截圖（每次執行的「emulator」產出檔，絕不顯示授權碼）。正式版 APK 以存放在儲存庫 secrets 中的金鑰簽署，所以每個新版都能直接覆蓋安裝。
+- **在 GitHub Actions 上建置與測試**（電腦上不必安裝任何東西）：程式、短程式與 shim 的測試、APK（Gradle 8.11、JDK 17），接著在 Android 14 模擬器上以臺北 101 為位置，像新手機一樣第一次執行：把授權碼（來自儲存庫的 secrets）輸入對話框，然後檢查完整畫面、詳細資料、返回鍵、雷達、中文連結、小工具、測試通知、飛航模式下的完整畫面，把手機移到東京後的小工具與完整畫面，以及在地圖上釘選一個位置，並逐一截圖（每次執行的「emulator」產出檔，絕不顯示授權碼）。正式版 APK 以存放在儲存庫 secrets 中的金鑰簽署，所以每個新版都能直接覆蓋安裝。
 
 ## 檔案
 - `TaiwanWeather.js`：整個 App（Scriptable 程式）。
+- `TaiwanWeather-loader.js`：放進 Scriptable 的短程式。它執行從 `main` 分支下載、存在手機上的 `TaiwanWeather.js`，並保持最新（`node test/loader.mjs` 會測試它，也會搭配真正的程式做端對端測試）。
 - `test/harness.mjs`：測試。以 Node 搭配模擬的 Scriptable API（`test/env.mjs`）執行，另外會對 Open-Meteo，以及 `.env` 中有 `CWA_KEY` 時對氣象署做即時測試；執行 `node test/harness.mjs`，加上 `OFFLINE=1` 則略過即時測試。
-- `tools/install-page.mjs`：產生複製頁（整支程式加上「Copy script」按鈕、iPhone 的步驟與 QR code），以私人的 claude.ai artifact 發布，不需 iCloud 雲碟即可安裝。
+- `tools/install-page.mjs`：產生複製頁（短程式加上「Copy script」按鈕、iPhone 的步驟與 QR code），以私人的 claude.ai artifact 發布，不需 iCloud 雲碟即可安裝。`TaiwanWeather-loader.js` 有變動時才需重新產生；新版的 `TaiwanWeather.js` 會自動從 `main` 送到手機上。
 - `android/`、`test/android-shim.mjs`、`.github/workflows/android.yml`：Android 版。
 
 更多技術細節請見[英文說明](README.md)。

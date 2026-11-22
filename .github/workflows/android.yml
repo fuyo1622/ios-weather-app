@@ -1,11 +1,11 @@
-# The Android app: test the shared script and the Android shim, build the APKs, run the test build on an Android
+# The Android app: test the shared script, the iPhone loader and the Android shim, build the APKs, run the test build on an Android
 # emulator (screenshots in the "emulator" artifact), then publish the signed APK as the "android-latest" release.
 name: Android
 
 on:
   push:
     branches: [android, main]
-    paths: ["android/**", "TaiwanWeather.js", "test/**", ".github/workflows/android.yml"]
+    paths: ["android/**", "TaiwanWeather.js", "TaiwanWeather-loader.js", "test/**", ".github/workflows/android.yml"]
   workflow_dispatch:
 
 permissions:
@@ -27,8 +27,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Script and Android shim tests (fixtures)
-        run: OFFLINE=1 node test/harness.mjs && node test/android-shim.mjs
+      - name: Script, iPhone loader and Android shim tests (fixtures)
+        run: OFFLINE=1 node test/harness.mjs && node test/loader.mjs && node test/android-shim.mjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
