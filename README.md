@@ -20,17 +20,11 @@ A self-calibrating forecast for Taiwan on your iPhone, with no Mac or App Store 
 1. **Get a CWA API key** (free): <https://opendata.cwa.gov.tw/userLogin> → 加入會員 (register) → 氣象會員登入, then
    開發指南 → 使用說明 → 取得授權碼. Copy the `CWA-...` key.
 2. **Install [Scriptable](https://apps.apple.com/app/scriptable/id1405459188)** (free) on your iPhone.
-3. **Put the short script on the phone**: open Scriptable → `+` → paste the contents of
-   [`TaiwanWeather-loader.js`](TaiwanWeather-loader.js) (about 70 lines) → tap the title and name it `TaiwanWeather`.
-   At its first run it downloads the full `TaiwanWeather.js` from this repository (branch `main`) and keeps it on the
-   phone next to the forecasts. After that, updates come by themselves: each time the app opens, it asks GitHub for a
-   new version and uses it from the next time. Widgets run the copy kept on the phone, with no download.
-   Scriptable never opens the long script itself: App Store reviews report long scripts crashing Scriptable on iOS 27.
-   Everything is kept on the phone, never in iCloud.
-   **If Scriptable crashes as it opens** and your iCloud storage is full, it may be failing to keep its scripts in iCloud
-   Drive. Turn iCloud off for Scriptable only: Settings → your name → iCloud → See All → Scriptable (perhaps inside
-   iCloud Drive). It then keeps its scripts on the phone. This changes only that iPhone.
-4. **Run it once inside Scriptable** (online, for the download): paste the API key when asked (stored in the iOS Keychain), and allow location access. You'll see the full view.
+3. **Copy the script to the phone**, either way works:
+   - Open Scriptable → `+` → paste the contents of `TaiwanWeather.js` → tap the title and name it `TaiwanWeather`; or
+   - *iCloud for Windows* (iCloud Drive on and not full): copy `TaiwanWeather.js` into iCloud Drive's Scriptable folder
+     (on Windows it is named `iCloud~dk~simonbs~Scriptable`; it appears after Scriptable has been opened once on the phone).
+4. **Run it once inside Scriptable**: paste the API key when asked (stored in the iOS Keychain), and allow location access. You'll see the full view.
    If CWA rejects the key (e.g. a typo), running the script in the app again offers to replace it.
 5. **Add widgets**: long-press the Home Screen → `+` → Scriptable → pick Small / Medium / Large → edit widget → Script: `TaiwanWeather`.
    Lock Screen: customise → add Scriptable (circular / rectangular / inline) → same script.
@@ -144,8 +138,6 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
 
 ## Files
 - `TaiwanWeather.js`: the whole app (Scriptable script).
-- `TaiwanWeather-loader.js`: what goes into Scriptable. It runs `TaiwanWeather.js`, downloaded from branch `main` and
-  kept on the phone, and keeps it up to date (`node test/loader.mjs` tests it, also end to end with the real script).
 - `README.zh-TW.md`: this description in Traditional Chinese.
 - `test/harness.mjs`: the tests. They run the script under Node with mocked Scriptable APIs (`test/env.mjs`), on
   fixtures generated from a synthetic "true" weather (including 10 simulated days of learning), then once against live Open-Meteo.
@@ -155,10 +147,9 @@ CWA's requests therefore don't wait for them, and they are given up after 10 s (
     and the full view as `test/.state/app.html` (fixtures) and `app-live.html` (live data).
   - Live tests decode RainViewer's real tiles over Taiwan and each 降雨雷達's last 20 minutes (`test/png.mjs`), run
     the next-hour forecast on them, and fail if they use colours the card doesn't know.
-- `tools/install-page.mjs`: builds the copy page (the short script behind a "Copy script" button, with the iPhone
+- `tools/install-page.mjs`: builds the copy page (the whole script behind a "Copy script" button, with the iPhone
   steps and a QR code), published as a private claude.ai artifact so the script can be installed without iCloud Drive.
-  Rebuild and republish it whenever `TaiwanWeather-loader.js` changes: `node tools/install-page.mjs <out.html> <page URL>`.
-  A new `TaiwanWeather.js` needs no new page: it reaches the phones from `main` by itself.
+  Rebuild and republish it whenever `TaiwanWeather.js` changes: `node tools/install-page.mjs <out.html> <page URL>`.
 - `SURVEY.md`: background research.
 - `android/`, `test/android-shim.mjs`, `.github/workflows/android.yml`: the Android app (below).
 
@@ -176,7 +167,7 @@ allow installing from that source; the first run asks for the CWA key, as on the
   `shim.js`), refreshed every 15 minutes (Android's shortest) while online, and at once when the language changes.
   Away from the app, My Location is the last place the app saw: Android shares the location with apps in the
   background only with an extra permission. Android has no lock-screen widgets.
-- **Built and tested on GitHub Actions** (nothing to install on a PC): the script's, the loader's and the shim's tests, the APKs
+- **Built and tested on GitHub Actions** (nothing to install on a PC): the script's and the shim's tests, the APKs
   (Gradle 8.11, JDK 17), then the test build on an Android 14 emulator at Taipei 101, first run as on a new phone:
   the CWA key (from the repository's secrets) typed into its dialog, then the full view, a detail sheet, the back
   button, the radar, the 中文 link, the widgets, the test notifications, the full view in airplane mode, and the

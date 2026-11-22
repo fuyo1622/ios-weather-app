@@ -384,7 +384,7 @@ export async function tap(url) {
 export const config = {};
 export function setConfig(c) { for (const k of Object.keys(config)) delete config[k]; Object.assign(config, c); }
 
-export const globals = { // (test/loader.mjs puts these on the global object, where Scriptable keeps them)
+const globals = {
   __TEST__: true,
   Date: FakeDate,
   Request,

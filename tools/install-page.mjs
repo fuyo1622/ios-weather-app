@@ -1,8 +1,6 @@
-// Builds the install page: the short TaiwanWeather script (TaiwanWeather-loader.js) behind a "Copy script" button,
-// with the iPhone steps. The short script downloads the full TaiwanWeather.js from GitHub and keeps it up to date, so
-// Scriptable never opens the long script (on iOS 27 that can crash Scriptable at every start). It is published as a
-// private claude.ai artifact, so it can be pasted into Scriptable without iCloud Drive. Rebuild and republish it
-// whenever TaiwanWeather-loader.js changes (a new TaiwanWeather.js reaches the phones by itself, from branch main).
+// Builds the install page: TaiwanWeather.js behind a "Copy script" button, with the iPhone steps.
+// It is published as a private claude.ai artifact, so the script can be pasted into Scriptable
+// without iCloud Drive. Rebuild and republish it whenever TaiwanWeather.js changes.
 //   node tools/install-page.mjs <out.html> [the page's own URL, for the QR code]
 import fs from "node:fs";
 import path from "node:path";
@@ -12,10 +10,8 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [out, pageUrl = ""] = process.argv.slice(2);
 if (!out) throw new Error("usage: node tools/install-page.mjs <out.html> [page URL]");
 
-const code = fs.readFileSync(path.join(root, "TaiwanWeather-loader.js"), "utf8");
-const lines = code.trimEnd().split("\n").length;
-const full = fs.readFileSync(path.join(root, "TaiwanWeather.js"), "utf8");
-const fullLines = full.trimEnd().split("\n").length, fullKb = Math.round(Buffer.byteLength(full) / 1024);
+const code = fs.readFileSync(path.join(root, "TaiwanWeather.js"), "utf8");
+const lines = code.split("\n").length, kb = Math.round(Buffer.byteLength(code) / 1024);
 const version = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" }); // YYYY-MM-DD
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -75,7 +71,7 @@ textarea { width: 100%; box-sizing: border-box; height: 16em; resize: vertical; 
   <header>
     <p class="eyebrow">Scriptable widget · 中央氣象署 + 7 models</p>
     <h1>TaiwanWeather</h1>
-    <p class="meta">Version ${version} · a ${lines}-line script that runs the full one (${fullLines.toLocaleString("en")} lines, ${fullKb} KB) from GitHub</p>
+    <p class="meta">Version ${version} · ${lines.toLocaleString("en")} lines · ${kb} KB</p>
   </header>
 
   <section class="qr" id="qr-box" aria-label="Open on your phone">
@@ -85,27 +81,7 @@ textarea { width: 100%; box-sizing: border-box; height: 16em; resize: vertical; 
 
   <section class="copy">
     <button id="copy" type="button">Copy script</button>
-    <p id="status" class="status" role="status">Copies the short script, ready to paste into Scriptable. 複製這個短程式。</p>
-  </section>
-
-  <section>
-    <h2>Scriptable crashes when it opens?</h2>
-    <p class="note">If your iCloud storage is full, Scriptable may fail to keep its scripts in iCloud Drive. Let it keep them on the
-      phone instead. This changes only this iPhone. The short script keeps everything on the phone, never in iCloud.<br>
-      iCloud 空間已滿時，Scriptable 可能無法把程式存在 iCloud 雲碟。改成存在手機上即可；這只影響這支 iPhone。這個短程式的所有資料都存在手機上，不用 iCloud。</p>
-    <ol>
-      <li><b>Settings</b> → your name → <b>iCloud</b> → <b>See All</b> (next to Saved to iCloud) → <b>Scriptable</b> (it may be inside
-        <b>iCloud Drive</b>) → off.<span>「設定」→ 你的名字 → iCloud →「儲存到 iCloud」旁的「顯示全部」→ Scriptable（可能在「iCloud 雲碟」裡）→ 關閉。</span></li>
-      <li>Open Scriptable (its list is empty now), then follow the steps below.<span>打開 Scriptable（清單現在是空的），再照下面的步驟做。</span></li>
-    </ol>
-    <p class="note">Still crashes? Tell Claude. 仍然閃退的話，請告訴 Claude。</p>
-  </section>
-
-  <section>
-    <h2>Already have the long TaiwanWeather?</h2>
-    <p class="note">Where Scriptable works, you can switch: copy the short script, open TaiwanWeather in Scriptable, select all, and
-      paste over it. Then tap ▶ once; updates come by themselves from then on.<br>
-      在 Scriptable 正常的手機上也可以換成短程式：複製後到 Scriptable 打開 TaiwanWeather，全選後貼上取代，再按一次 ▶；之後就會自動更新。</p>
+    <p id="status" class="status" role="status">Copies the whole script, ready to paste into Scriptable. 複製整個程式。</p>
   </section>
 
   <section>
@@ -115,18 +91,16 @@ textarea { width: 100%; box-sizing: border-box; height: 16em; resize: vertical; 
       <li>Tap <b>Copy script</b> above.<span>按上方的 Copy script。</span></li>
       <li>In Scriptable, tap <b>+</b> (top right), tap the empty page, then <b>Paste</b>.<span>在 Scriptable 點右上角「+」，點一下空白處，選「貼上」。</span></li>
       <li>Tap the title at the top, rename it <b>TaiwanWeather</b>, then tap <b>Done</b>.<span>點最上方的標題，改名為 TaiwanWeather，再按「完成」。</span></li>
-      <li>Open it and tap <b>▶</b> (bottom right). The first time, it downloads the full weather script from GitHub (about ${fullKb} KB,
-        so it needs the internet). Paste your CWA key (<code>CWA-XXXXXXXX-…</code>) if asked, and allow location.<span>打開它，按右下角 ▶ 執行。第一次會從 GitHub 下載完整的天氣程式（約 ${fullKb} KB，需要網路）。若要求授權碼，貼上 CWA 授權碼，並允許取用位置。</span></li>
+      <li>Open it and tap <b>▶</b> (bottom right): paste your CWA key (<code>CWA-XXXXXXXX-…</code>) and allow location.<span>打開它，按右下角 ▶ 執行：貼上 CWA 授權碼，並允許取用位置。</span></li>
     </ol>
-    <p class="note">Updates need nothing from you. Each time you open TaiwanWeather in Scriptable, it gets the newest version from
-      GitHub and uses it from the next time. The widgets use the copy kept on the phone.<br>
-      之後的更新不必做任何事：每次在 Scriptable 打開 TaiwanWeather，它會從 GitHub 取得最新版，下次開啟時使用。小工具用手機上保留的那一份。</p>
+    <p class="note">Updating later: open this page again, copy, then open TaiwanWeather in Scriptable, select all, and paste over it.<br>
+      之後更新：再開本頁複製，到 Scriptable 打開 TaiwanWeather，全選後貼上取代。</p>
   </section>
 
   <section>
     <h2>Copy didn't work?</h2>
     <p class="note">Tap in the box, choose <b>Select All</b> (全選), then <b>Copy</b> (拷貝).</p>
-    <textarea id="code" readonly spellcheck="false" aria-label="TaiwanWeather (short script)">${esc(code)}</textarea>
+    <textarea id="code" readonly spellcheck="false" aria-label="TaiwanWeather.js">${esc(code)}</textarea>
   </section>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -156,4 +130,4 @@ if (pageUrl && window.QRCode) {
 </html>
 `;
 fs.writeFileSync(out, html);
-console.log(`wrote ${out}: the ${lines}-line loader (full script ${fullLines} lines, ${fullKb} KB)${pageUrl ? ", QR for " + pageUrl : ""}`);
+console.log(`wrote ${out}: ${lines} lines, ${kb} KB of script${pageUrl ? ", QR for " + pageUrl : ""}`);
